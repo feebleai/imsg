@@ -3,6 +3,19 @@ import Foundation
 import IMsgCore
 
 enum StatusCommand {
+  static func availableBridgeSendCommands(selectors: [String: Bool]) -> [String] {
+    var commands = ["send-rich", "send-multipart", "send-attachment"]
+    if selectors["stickerSend"] == true { commands.append("send-sticker") }
+    commands.append("tapback")
+    return commands
+  }
+
+  static func advertisedRPCMethods(selectors: [String: Bool]) -> [String] {
+    selectors["clientMessageGuidReservation"] == true
+      ? kSupportedRPCMethods
+      : kSupportedRPCMethods.filter { $0 != "send.tracked" }
+  }
+
   static let spec = CommandSpec(
     name: "status",
     abstract: "Check availability of imsg advanced features",
@@ -34,19 +47,43 @@ enum StatusCommand {
       }
     }()
 
+    // Probe the bridge for v2 readiness + selector availability.
+    var bridgeVersion: Int = 0
+    var v2Ready: Bool = false
+    var selectors: [String: Bool] = [:]
+    if availability.available {
+      do {
+        let data = try await IMsgBridgeClient.shared.invoke(
+          action: .status, params: [:], timeout: 3.0)
+        bridgeVersion = (data["bridge_version"] as? Int) ?? 0
+        v2Ready = (data["v2_ready"] as? Bool) ?? false
+        if let raw = data["selectors"] as? [String: Bool] { selectors = raw }
+      } catch {
+        // Bridge probe failure is non-fatal.
+      }
+    }
+
     if runtime.jsonOutput {
       let payload = StatusPayload(
+        version: IMsgVersion.current,
         basicFeatures: true,
         advancedFeatures: availability.available,
         typingIndicators: availability.available,
         readReceipts: availability.available,
         sip: sipStatus,
-        message: availability.message
+        message: availability.message,
+        bridgeVersion: bridgeVersion,
+        v2Ready: v2Ready,
+        selectors: selectors,
+        rpcMethods: advertisedRPCMethods(selectors: selectors)
       )
       try JSONLines.print(payload)
     } else {
       StdoutWriter.writeLine("imsg Status Report")
       StdoutWriter.writeLine("==================")
+      StdoutWriter.writeLine("")
+      StdoutWriter.writeLine("Version:")
+      StdoutWriter.writeLine("  \(IMsgVersion.current)")
       StdoutWriter.writeLine("")
       StdoutWriter.writeLine("Basic features (send, receive, history):")
       StdoutWriter.writeLine("  Available")
@@ -57,12 +94,27 @@ enum StatusCommand {
       StdoutWriter.writeLine("Advanced features (typing, read receipts):")
       if availability.available {
         StdoutWriter.writeLine("  Available - IMCore bridge connected")
+        StdoutWriter.writeLine(
+          "  bridge version: v\(bridgeVersion)\(v2Ready ? " (v2 inbox active)" : "")")
+        if !selectors.isEmpty {
+          StdoutWriter.writeLine("  selectors:")
+          for key in selectors.keys.sorted() {
+            let ok = selectors[key] ?? false
+            StdoutWriter.writeLine("    \(key): \(ok ? "✓" : "✗")")
+          }
+        }
         StdoutWriter.writeLine("")
-        StdoutWriter.writeLine("Available commands:")
-        StdoutWriter.writeLine("  imsg read --to <handle>")
-        StdoutWriter.writeLine("  imsg typing --to <handle>")
-        StdoutWriter.writeLine("  imsg launch")
-        StdoutWriter.writeLine("  imsg status")
+        StdoutWriter.writeLine("Available bridge commands:")
+        let sendCommands = availableBridgeSendCommands(selectors: selectors)
+        StdoutWriter.writeLine("  Send: imsg \(sendCommands.joined(separator: ", "))")
+        StdoutWriter.writeLine("  Mutate: imsg edit, unsend, delete-message, notify-anyways")
+        StdoutWriter.writeLine(
+          "  Chat: imsg chat-create, chat-name, chat-photo, chat-add/remove-member, chat-leave/delete, chat-mark"
+        )
+        StdoutWriter.writeLine("  Introspect: imsg account, whois, nickname")
+        StdoutWriter.writeLine("  Name & Photo: imsg name-photo status|share")
+        StdoutWriter.writeLine("  Local DB: imsg search")
+        StdoutWriter.writeLine("  Watch with events: imsg watch --bb-events")
       } else {
         StdoutWriter.writeLine("  Not available")
         StdoutWriter.writeLine("")
@@ -81,6 +133,14 @@ enum StatusCommand {
         StdoutWriter.writeLine("     make build-dylib")
         StdoutWriter.writeLine("     imsg launch")
         StdoutWriter.writeLine("")
+        StdoutWriter.writeLine("macOS 26/Tahoe note:")
+        StdoutWriter.writeLine(
+          "  Advanced IMCore features may still be blocked by library validation"
+        )
+        StdoutWriter.writeLine(
+          "  or imagent private entitlement checks. Basic commands still work."
+        )
+        StdoutWriter.writeLine("")
         StdoutWriter.writeLine("Note: Basic messaging features work without these steps.")
       }
     }
@@ -88,19 +148,29 @@ enum StatusCommand {
 }
 
 private struct StatusPayload: Encodable {
+  let version: String
   let basicFeatures: Bool
   let advancedFeatures: Bool
   let typingIndicators: Bool
   let readReceipts: Bool
   let sip: String
   let message: String
+  let bridgeVersion: Int
+  let v2Ready: Bool
+  let selectors: [String: Bool]
+  let rpcMethods: [String]
 
   enum CodingKeys: String, CodingKey {
+    case version
     case basicFeatures = "basic_features"
     case advancedFeatures = "advanced_features"
     case typingIndicators = "typing_indicators"
     case readReceipts = "read_receipts"
     case sip
     case message
+    case bridgeVersion = "bridge_version"
+    case v2Ready = "v2_ready"
+    case selectors
+    case rpcMethods = "rpc_methods"
   }
 }

@@ -23,6 +23,11 @@ enum SendCommand {
           .make(
             label: "region", names: [.long("region")],
             help: "default region for phone normalization"),
+        ],
+        flags: [
+          .make(
+            label: "noSMSFallback", names: [.long("no-sms-fallback")],
+            help: "disable automatic iMessage->SMS fallback for text-only auto phone sends")
         ]
       )
     ),
@@ -39,19 +44,48 @@ enum SendCommand {
     values: ParsedValues,
     runtime: RuntimeOptions,
     sendMessage: @escaping (MessageSendOptions) throws -> Void = { try MessageSender().send($0) },
-    storeFactory: @escaping (String) throws -> MessageStore = { try MessageStore(path: $0) }
+    resolveSentMessage:
+      @escaping (
+        MessageStore,
+        MessageSendOptions,
+        Int64?,
+        Date
+      ) async throws -> Message? = SentMessageVerifier.resolveSentMessage,
+    storeFactory: @escaping (String) throws -> MessageStore = { try MessageStore(path: $0) },
+    contactResolverFactory: @escaping (String) async -> any ContactResolving = { region in
+      await ContactResolver.create(region: region)
+    },
+    resolveService: @escaping (MessageStore, String, String) -> HandleServiceAvailability = {
+      store, handle, region in
+      (try? store.preferredService(forHandle: handle, region: region)) ?? .unknown
+    }
   ) async throws {
-    let dbPath = values.option("db") ?? MessageStore.defaultPath
-    let input = ChatTargetInput(
-      recipient: values.option("to") ?? "",
+    let region = values.option("region") ?? "US"
+    let rawRecipient = values.option("to") ?? ""
+    let rawInput = ChatTargetInput(
+      recipient: rawRecipient,
       chatID: values.optionInt64("chatID"),
       chatIdentifier: values.option("chatIdentifier") ?? "",
       chatGUID: values.option("chatGUID") ?? ""
     )
     try ChatTargetResolver.validateRecipientRequirements(
-      input: input,
+      input: rawInput,
       mixedTargetError: ParsedValuesError.invalidOption("to"),
       missingRecipientError: ParsedValuesError.missingOption("to")
+    )
+    let recipient: String
+    if !rawInput.hasChatTarget && ChatTargetResolver.looksLikeContactName(rawRecipient) {
+      let contacts = await contactResolverFactory(region)
+      recipient = try ChatTargetResolver.resolveRecipientName(rawRecipient, contacts: contacts)
+    } else {
+      recipient = rawRecipient
+    }
+
+    let input = ChatTargetInput(
+      recipient: recipient,
+      chatID: rawInput.chatID,
+      chatIdentifier: rawInput.chatIdentifier,
+      chatGUID: rawInput.chatGUID
     )
 
     let text = values.option("text") ?? ""
@@ -63,12 +97,21 @@ enum SendCommand {
     guard let service = MessageService(rawValue: serviceRaw) else {
       throw IMsgError.invalidService(serviceRaw)
     }
-    let region = values.option("region") ?? "US"
+
+    let dbPath = values.option("db") ?? MessageStore.defaultPath
+    let store: MessageStore?
+    if input.hasChatTarget {
+      store = try storeFactory(dbPath)
+    } else {
+      store = try? storeFactory(dbPath)
+    }
 
     let resolvedTarget = try await ChatTargetResolver.resolveChatTarget(
       input: input,
       lookupChat: { chatID in
-        let store = try storeFactory(dbPath)
+        guard let store else {
+          throw IMsgError.invalidChatTarget("Messages database unavailable")
+        }
         return try store.chatInfo(chatID: chatID)
       },
       unknownChatError: { chatID in
@@ -79,19 +122,78 @@ enum SendCommand {
       throw IMsgError.invalidChatTarget("Missing chat identifier or guid")
     }
 
-    try sendMessage(
-      MessageSendOptions(
+    var effectiveService = service
+    if let store, service == .auto && !input.hasChatTarget && !input.recipient.isEmpty {
+      switch resolveService(store, input.recipient, region) {
+      case .imessage, .unknown:
+        effectiveService = .auto
+      case .sms:
+        effectiveService = .sms
+      }
+    }
+
+    let directChatInfo: ChatInfo?
+    if let store, !input.hasChatTarget {
+      directChatInfo = try ChatTargetResolver.existingDirectChat(
+        store: store,
         recipient: input.recipient,
-        text: text,
-        attachmentPath: file,
-        service: service,
-        region: region,
-        chatIdentifier: resolvedTarget.chatIdentifier,
-        chatGUID: resolvedTarget.chatGUID
-      ))
+        service: effectiveService,
+        includeAnyForSMS: service == .auto && effectiveService == .sms
+      )
+    } else {
+      directChatInfo = nil
+    }
+
+    let allowSMSFallback =
+      service == .auto
+      && !input.hasChatTarget
+      && !input.recipient.isEmpty
+      && !text.isEmpty
+      && file.isEmpty
+      && !values.flag("noSMSFallback")
+
+    let options = MessageSendOptions(
+      recipient: input.recipient,
+      text: text,
+      attachmentPath: file,
+      service: effectiveService,
+      region: region,
+      chatIdentifier: input.hasChatTarget ? resolvedTarget.chatIdentifier : "",
+      chatGUID: input.hasChatTarget ? resolvedTarget.chatGUID : (directChatInfo?.guid ?? ""),
+      allowSMSFallback: allowSMSFallback,
+      directParticipantTarget: ChatTargetResolver.directParticipantTarget(
+        store: store, resolvedTarget: resolvedTarget, directChatInfo: directChatInfo)
+    )
+    let sentAt = Date()
+    try sendMessage(options)
+
+    var sentMessage: Message?
+    if let store, input.hasChatTarget || !text.isEmpty {
+      let verificationChatID =
+        input.chatID
+        ?? (input.hasChatTarget ? resolvedTarget.preferredIdentifier : nil).flatMap {
+          try? store.chatInfo(matchingTarget: $0)?.id
+        }
+        ?? directChatInfo?.id
+      sentMessage = try await SentMessageVerifier.verifyAppleScriptSend(
+        store: store,
+        options: options,
+        chatID: verificationChatID,
+        sentAt: sentAt,
+        resolve: resolveSentMessage
+      )
+    }
 
     if runtime.jsonOutput {
-      try StdoutWriter.writeJSONLine(["status": "sent"])
+      var payload: [String: Any] = ["status": "sent"]
+      if let sentMessage {
+        payload["id"] = sentMessage.rowID
+        if !sentMessage.guid.isEmpty {
+          payload["guid"] = sentMessage.guid
+          payload["message_id"] = sentMessage.guid
+        }
+      }
+      try JSONLines.printObject(payload)
     } else {
       StdoutWriter.writeLine("sent")
     }

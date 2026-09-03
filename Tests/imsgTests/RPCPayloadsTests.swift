@@ -12,21 +12,47 @@ func isGroupHandleFlagsGroup() {
 }
 
 @Test
-func chatPayloadIncludesParticipantsAndGroupFlag() {
+func canonicalChatPayloadIncludesParticipantsAndGroupFlag() throws {
   let date = Date(timeIntervalSince1970: 0)
-  let payload = chatPayload(
+  let chat = Chat(
+    id: 1,
+    identifier: "iMessage;+;chat123",
+    name: "Group",
+    service: "iMessage",
+    lastMessageAt: date
+  )
+  let info = ChatInfo(
     id: 1,
     identifier: "iMessage;+;chat123",
     guid: "iMessage;+;chat123",
-    name: "Group",
-    service: "iMessage",
-    lastMessageAt: date,
-    participants: ["+111", "+222"]
+    name: "Group title",
+    service: "iMessage"
   )
-  #expect(payload["id"] as? Int64 == 1)
+  let payload = try ChatPayload(
+    chat: chat, chatInfo: info, participants: ["+111", "+222"]
+  ).asDictionary()
+  #expect((payload["id"] as? NSNumber)?.int64Value == 1)
   #expect(payload["identifier"] as? String == "iMessage;+;chat123")
+  #expect(payload["display_name"] as? String == "Group title")
   #expect(payload["is_group"] as? Bool == true)
   #expect((payload["participants"] as? [String])?.count == 2)
+}
+
+@Test
+func canonicalChatPayloadIncludesContactName() throws {
+  let chat = Chat(
+    id: 2,
+    identifier: "+15551234567",
+    name: "+15551234567",
+    service: "iMessage",
+    lastMessageAt: Date(timeIntervalSince1970: 0)
+  )
+  let payload = try ChatPayload(
+    chat: chat,
+    participants: ["+15551234567"],
+    contactName: "Alice"
+  ).asDictionary()
+  #expect(payload["contact_name"] as? String == "Alice")
 }
 
 @Test
@@ -44,6 +70,7 @@ func messagePayloadIncludesChatFields() throws {
     guid: "msg-guid-5",
     replyToGUID: "msg-guid-1",
     threadOriginatorGUID: "thread-guid-5",
+    threadOriginatorPart: "0:0:5",
     destinationCallerID: "me@icloud.com"
   )
   let chatInfo = ChatInfo(
@@ -61,6 +88,8 @@ func messagePayloadIncludesChatFields() throws {
     totalBytes: 12,
     isSticker: false,
     originalPath: "/tmp/file.dat",
+    convertedPath: "/tmp/file.png",
+    convertedMimeType: "image/png",
     missing: false
   )
   let reaction = Reaction(
@@ -83,13 +112,203 @@ func messagePayloadIncludesChatFields() throws {
   #expect(payload["reply_to_guid"] as? String == "msg-guid-1")
   #expect(payload["destination_caller_id"] as? String == "me@icloud.com")
   #expect(payload["thread_originator_guid"] as? String == "thread-guid-5")
+  #expect(payload["thread_originator_part"] as? String == "0:0:5")
   #expect(payload["chat_identifier"] as? String == "iMessage;+;chat123")
   #expect(payload["chat_name"] as? String == "Group")
   #expect(payload["is_group"] as? Bool == true)
   #expect((payload["attachments"] as? [[String: Any]])?.count == 1)
+  let attachmentPayload = try #require((payload["attachments"] as? [[String: Any]])?.first)
+  #expect(
+    Set(attachmentPayload.keys) == [
+      "filename", "transfer_name", "uti", "mime_type", "total_bytes", "is_sticker",
+      "original_path", "converted_path", "converted_mime_type", "missing",
+    ])
+  #expect((attachmentPayload["total_bytes"] as? NSNumber)?.int64Value == 12)
+  #expect(attachmentPayload["original_path"] as? String == "/tmp/file.dat")
+  #expect(attachmentPayload["converted_path"] as? String == "/tmp/file.png")
+  #expect(attachmentPayload["converted_mime_type"] as? String == "image/png")
   #expect(
     (payload["reactions"] as? [[String: Any]])?.first?["emoji"] as? String
       == ReactionType.like.emoji)
+}
+
+@Test
+func messagePayloadIncludesCoalescedURLPreview() throws {
+  let message = Message(
+    rowID: 5,
+    chatID: 10,
+    sender: "+123",
+    text: "Dump https://example.com",
+    date: Date(timeIntervalSince1970: 1),
+    isFromMe: false,
+    service: "iMessage",
+    handleID: nil,
+    attachmentsCount: 0,
+    guid: "text-guid",
+    urlPreview: Message.URLPreviewMetadata(
+      rowID: 6,
+      guid: "preview-guid",
+      balloonBundleID: MessageStore.urlPreviewBalloonBundleID,
+      date: Date(timeIntervalSince1970: 2)
+    )
+  )
+
+  let payload = try messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: []
+  )
+
+  let preview = payload["url_preview"] as? [String: Any]
+  #expect(preview?["id"] as? Int64 == 6)
+  #expect(preview?["guid"] as? String == "preview-guid")
+  #expect(preview?["balloon_bundle_id"] as? String == MessageStore.urlPreviewBalloonBundleID)
+  #expect(preview?["created_at"] as? String == "1970-01-01T00:00:02.000Z")
+}
+
+@Test
+func messagePayloadIncludesPollObject() throws {
+  let poll = MessagePollEvent(
+    kind: .created,
+    pollGUID: "poll-guid",
+    question: "Choose?",
+    options: [
+      MessagePollOption(id: "choice-a", text: "A"),
+      MessagePollOption(id: "choice-b", text: "B"),
+    ]
+  )
+  let message = Message(
+    rowID: 12,
+    chatID: 10,
+    sender: "+123",
+    text: "",
+    date: Date(timeIntervalSince1970: 3),
+    isFromMe: false,
+    service: "iMessage",
+    handleID: 1,
+    attachmentsCount: 0,
+    guid: "poll-row-guid",
+    poll: poll
+  )
+
+  let payload = try messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: []
+  )
+
+  let pollPayload = try #require(payload["poll"] as? [String: Any])
+  #expect(pollPayload["kind"] as? String == "created")
+  #expect(pollPayload["event"] as? String == "imessage.poll.created")
+  #expect(pollPayload["poll_guid"] as? String == "poll-guid")
+  #expect(pollPayload["question"] as? String == "Choose?")
+  #expect((pollPayload["options"] as? [[String: Any]])?.count == 2)
+}
+
+@Test
+func messagePayloadExposesReplyParentSnakeCaseKeys() throws {
+  let message = Message(
+    rowID: 11,
+    chatID: 10,
+    sender: "+456",
+    text: "Calendar",
+    date: Date(timeIntervalSince1970: 3),
+    isFromMe: false,
+    service: "iMessage",
+    handleID: 2,
+    attachmentsCount: 0,
+    guid: "reply-guid",
+    threadOriginatorGUID: "parent-guid",
+    threadOriginatorPart: "0:0:47",
+    replyToText: "Should I lead with calendar, family, or email?",
+    replyToSender: "+123"
+  )
+  let payload = try messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: []
+  )
+
+  #expect(
+    payload["reply_to_text"] as? String == "Should I lead with calendar, family, or email?"
+  )
+  #expect(payload["reply_to_sender"] as? String == "+123")
+  #expect(payload["thread_originator_guid"] as? String == "parent-guid")
+  #expect(payload["thread_originator_part"] as? String == "0:0:47")
+}
+
+@Test
+func messagePayloadOmitsReplyParentWhenAbsent() throws {
+  let message = Message(
+    rowID: 12,
+    chatID: 10,
+    sender: "+456",
+    text: "standalone",
+    date: Date(timeIntervalSince1970: 3),
+    isFromMe: false,
+    service: "iMessage",
+    handleID: 2,
+    attachmentsCount: 0,
+    guid: "msg-guid-12"
+  )
+  let payload = try messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: []
+  )
+
+  // JSONSerialization preserves Codable `nil` as a missing key (the bridging
+  // omits NSNull entries from `Encodable?` properties). Treat both
+  // "missing key" and "NSNull" as absent so the assertion stays robust to
+  // SQLite.swift / Foundation behaviour changes.
+  let replyText = payload["reply_to_text"]
+  let replySender = payload["reply_to_sender"]
+  #expect(replyText == nil || replyText is NSNull)
+  #expect(replySender == nil || replySender is NSNull)
+}
+
+@Test
+func messagePayloadIncludesSenderAndReactionNames() throws {
+  let message = Message(
+    rowID: 7,
+    chatID: 10,
+    sender: "+123",
+    text: "hello",
+    date: Date(timeIntervalSince1970: 1),
+    isFromMe: false,
+    service: "iMessage",
+    handleID: nil,
+    attachmentsCount: 0,
+    guid: "msg-guid-7"
+  )
+  let reaction = Reaction(
+    rowID: 101,
+    reactionType: .love,
+    sender: "+456",
+    isFromMe: false,
+    date: Date(timeIntervalSince1970: 2),
+    associatedMessageID: 7
+  )
+  let payload = try messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: [reaction],
+    senderName: "Alice",
+    reactionSenderNames: [101: "Bob"]
+  )
+  #expect(payload["sender_name"] as? String == "Alice")
+  let reactions = payload["reactions"] as? [[String: Any]]
+  #expect(reactions?.first?["sender_name"] as? String == "Bob")
 }
 
 @Test
@@ -121,12 +340,62 @@ func messagePayloadOmitsEmptyReplyToGuid() throws {
 }
 
 @Test
-func paramParsingHelpers() {
-  #expect(stringParam(123 as NSNumber) == "123")
-  #expect(intParam("42") == 42)
-  #expect(int64Param(NSNumber(value: 9_223_372_036_854_775_000 as Int64)) != nil)
-  #expect(boolParam("true") == true)
-  #expect(boolParam("false") == false)
-  #expect(stringArrayParam("a,b , c").count == 3)
-  #expect(stringArrayParam(["x", "y"]).count == 2)
+func watchDebounceIntervalDefaultsToHalfSecond() throws {
+  let params = try RPCParameters(
+    [:], method: "watch.subscribe", supportedKeys: ["debounce_ms", "debounceMs"])
+  #expect(try watchDebounceIntervalParam(params) == 0.5)
+}
+
+@Test
+func watchDebounceIntervalAcceptsSnakeAndCamelCaseMilliseconds() throws {
+  let snake = try RPCParameters(
+    ["debounce_ms": 750],
+    method: "watch.subscribe",
+    supportedKeys: ["debounce_ms", "debounceMs"]
+  )
+  let camel = try RPCParameters(
+    ["debounceMs": 125],
+    method: "watch.subscribe",
+    supportedKeys: ["debounce_ms", "debounceMs"]
+  )
+  #expect(try watchDebounceIntervalParam(snake) == 0.75)
+  #expect(try watchDebounceIntervalParam(camel) == 0.125)
+}
+
+@Test
+func watchDebounceIntervalRejectsInvalidValues() {
+  do {
+    let params = try RPCParameters(
+      ["debounce_ms": -1],
+      method: "watch.subscribe",
+      supportedKeys: ["debounce_ms", "debounceMs"]
+    )
+    _ = try watchDebounceIntervalParam(params)
+    #expect(Bool(false))
+  } catch let error as RPCError {
+    #expect(error.code == -32602)
+    #expect(error.data?.contains("debounce_ms") == true)
+  } catch {
+    #expect(Bool(false))
+  }
+}
+
+@Test
+func rpcParametersPreserveStrictJSONTypes() throws {
+  let params = try RPCParameters(
+    [
+      "string": "value",
+      "integer": 42,
+      "int64": NSNumber(value: 9_223_372_036_854_775_000 as Int64),
+      "boolean": true,
+      "strings": ["x", "y"],
+    ],
+    method: "test",
+    supportedKeys: ["string", "integer", "int64", "boolean", "strings"]
+  )
+  #expect(try params.string("string") == "value")
+  #expect(try params.integer("integer") == 42)
+  #expect(try params.int64("int64") != nil)
+  #expect(try params.boolean("boolean") == true)
+  #expect(try params.stringArray("strings") == ["x", "y"])
 }

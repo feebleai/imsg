@@ -1,25 +1,27 @@
 SHELL := /bin/bash
 
-.PHONY: help format lint test build imsg clean build-dylib
+.PHONY: help format lint test build imsg clean build-dylib docs-site
 
 help:
 	@printf "%s\n" \
 		"make format     - swift format in-place" \
 		"make lint       - swift format lint + swiftlint" \
-		"make test       - sync version, patch deps, run swift test" \
+		"make test       - run docs-site and Swift tests" \
 		"make build      - universal release build into bin/" \
 		"make build-dylib - build injectable dylib for Messages.app" \
 		"make imsg       - clean rebuild + run debug binary (ARGS=...)" \
+		"make docs-site  - build the imsg.sh docs site into dist/docs-site" \
 		"make clean      - swift package clean"
 
 format:
-	swift format --in-place --recursive Sources Tests
+	swift format --in-place --recursive Sources Tests TestsLinux
 
 lint:
-	swift format lint --recursive Sources Tests
+	swift format lint --recursive Sources Tests TestsLinux
 	swiftlint
 
 test:
+	node --test scripts/build-docs-site.test.mjs
 	scripts/generate-version.sh
 	swift package resolve
 	scripts/patch-deps.sh
@@ -39,7 +41,11 @@ build-dylib:
 	@mkdir -p .build/release
 	@clang -dynamiclib -arch arm64e -fobjc-arc \
 		-Wno-arc-performSelector-leaks \
+		-install_name @rpath/imsg-bridge-helper.dylib \
 		-framework Foundation \
+		-framework AppKit \
+		-framework ImageIO \
+		-framework LinkPresentation \
 		-o .build/release/imsg-bridge-helper.dylib \
 		Sources/IMsgHelper/IMsgInjected.m
 	@echo "Built .build/release/imsg-bridge-helper.dylib"
@@ -52,6 +58,10 @@ imsg:
 	swift build -c debug --product imsg
 	./.build/debug/imsg $(ARGS)
 
+docs-site:
+	node scripts/build-docs-site.mjs
+
 clean:
 	swift package clean
 	@rm -f .build/release/imsg-bridge-helper.dylib
+	@rm -rf dist/docs-site

@@ -1,38 +1,9 @@
 import Foundation
+import SQLite
 import Testing
 
 @testable import IMsgCore
 @testable import imsg
-
-final class TestRPCOutput: RPCOutput, @unchecked Sendable {
-  private let lock = NSLock()
-  private(set) var responses: [[String: Any]] = []
-  private(set) var errors: [[String: Any]] = []
-  private(set) var notifications: [[String: Any]] = []
-
-  func sendResponse(id: Any, result: Any) {
-    record(&responses, value: ["jsonrpc": "2.0", "id": id, "result": result])
-  }
-
-  func sendError(id: Any?, error: RPCError) {
-    let payload: [String: Any] = [
-      "jsonrpc": "2.0",
-      "id": id ?? NSNull(),
-      "error": error.asDictionary(),
-    ]
-    record(&errors, value: payload)
-  }
-
-  func sendNotification(method: String, params: Any) {
-    record(&notifications, value: ["jsonrpc": "2.0", "method": method, "params": params])
-  }
-
-  private func record(_ bucket: inout [[String: Any]], value: [String: Any]) {
-    lock.lock()
-    defer { lock.unlock() }
-    bucket.append(value)
-  }
-}
 
 private func int64Value(_ value: Any?) -> Int64? {
   if let value = value as? Int64 { return value }
@@ -45,7 +16,8 @@ private func int64Value(_ value: Any?) -> Int64? {
 func rpcChatsListReturnsChatPayload() async throws {
   let store = try CommandTestDatabase.makeStoreForRPC()
   let output = TestRPCOutput()
-  let server = RPCServer(store: store, verbose: false, output: output)
+  let resolver = MockContactResolver(names: ["iMessage;+;chat123": "Family"])
+  let server = RPCServer(store: store, verbose: false, output: output, contactResolver: resolver)
 
   let line = #"{"jsonrpc":"2.0","id":"1","method":"chats.list","params":{"limit":10}}"#
   await server.handleLineForTesting(line)
@@ -55,9 +27,18 @@ func rpcChatsListReturnsChatPayload() async throws {
   let chats = result?["chats"] as? [[String: Any]] ?? []
   #expect(chats.count == 1)
   let chat = chats[0]
+  #expect(
+    Set(chat.keys) == [
+      "id", "name", "identifier", "service", "last_message_at", "guid", "display_name",
+      "is_group", "participants", "account_id", "account_login", "last_addressed_handle",
+    ])
   #expect(int64Value(chat["id"]) == 1)
+  #expect(chat["name"] as? String == "Group Chat")
+  #expect(chat["display_name"] as? String == "Group Chat")
+  #expect(chat["guid"] as? String == "iMessage;+;chat123")
   #expect(chat["identifier"] as? String == "iMessage;+;chat123")
   #expect(chat["is_group"] as? Bool == true)
+  #expect(chat["contact_name"] == nil)
   #expect((chat["participants"] as? [String])?.count == 2)
 }
 
@@ -81,6 +62,81 @@ func rpcMessagesHistoryIncludesChatFields() async throws {
 }
 
 @Test
+func rpcChatsCreateForwardsBridgeIdentityFields() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  var capturedAction: BridgeAction?
+  var capturedParams: [String: Any] = [:]
+  let server = RPCServer(
+    store: store,
+    verbose: false,
+    output: output,
+    invokeBridge: { action, params in
+      capturedAction = action
+      capturedParams = params
+      return [
+        "chatGuid": "iMessage;+;chat987",
+        "messageGuid": "created-message-guid",
+        "service": "iMessage",
+      ]
+    },
+    isBridgeReady: { true }
+  )
+
+  let line =
+    #"{"jsonrpc":"2.0","id":"create","method":"chats.create","params":{"#
+    + #""addresses":[" +123 ","+456"],"service":"ImEsSaGe","name":"Group","text":"hello"}}"#
+  await server.handleLineForTesting(line)
+
+  #expect(capturedAction == .createChat)
+  #expect(capturedParams["addresses"] as? [String] == ["+123", "+456"])
+  #expect(capturedParams["service"] as? String == "iMessage")
+  #expect(capturedParams["displayName"] as? String == "Group")
+  #expect(capturedParams["message"] as? String == "hello")
+  let result = output.responses.first?["result"] as? [String: Any]
+  #expect(result?["ok"] as? Bool == true)
+  #expect(result?["chat_guid"] as? String == "iMessage;+;chat987")
+  #expect(result?["message_guid"] as? String == "created-message-guid")
+  #expect(result?["service"] as? String == "iMessage")
+}
+
+@Test
+func rpcMessagesHistoryReportsConvertedAttachmentsWhenRequested() async throws {
+  let source = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString)
+    .appendingPathExtension("caf")
+  try Data("caf".utf8).write(to: source)
+  defer { try? FileManager.default.removeItem(at: source) }
+  let converted = AttachmentResolver.convertedURL(for: source.path, targetExtension: "m4a")
+  try FileManager.default.createDirectory(
+    at: converted.deletingLastPathComponent(),
+    withIntermediateDirectories: true
+  )
+  try Data("m4a".utf8).write(to: converted)
+  defer { try? FileManager.default.removeItem(at: converted) }
+
+  let store = try CommandTestDatabase.makeStoreForRPCWithAttachment(
+    filename: source.path,
+    transferName: "voice.caf",
+    uti: "com.apple.coreaudio-format",
+    mimeType: "audio/x-caf"
+  )
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let line =
+    #"{"jsonrpc":"2.0","id":2,"method":"messages.history","params":{"chat_id":1,"attachments":true,"convert_attachments":true}}"#
+  await server.handleLineForTesting(line)
+
+  let result = output.responses.first?["result"] as? [String: Any]
+  let messages = result?["messages"] as? [[String: Any]] ?? []
+  let attachments = messages.first?["attachments"] as? [[String: Any]]
+  #expect(attachments?.first?["original_path"] as? String == source.path)
+  #expect(attachments?.first?["converted_path"] as? String == converted.path)
+  #expect(attachments?.first?["converted_mime_type"] as? String == "audio/mp4")
+}
+
+@Test
 func rpcSendResolvesChatID() async throws {
   let store = try CommandTestDatabase.makeStoreForRPC()
   let output = TestRPCOutput()
@@ -89,7 +145,8 @@ func rpcSendResolvesChatID() async throws {
     store: store,
     verbose: false,
     output: output,
-    sendMessage: { options in captured = options }
+    sendMessage: { options in captured = options },
+    resolveSentMessage: resolvedSentMessageFixture
   )
 
   let line = #"{"jsonrpc":"2.0","id":"3","method":"send","params":{"chat_id":1,"text":"yo"}}"#
@@ -99,6 +156,168 @@ func rpcSendResolvesChatID() async throws {
   #expect(captured?.chatGUID == "iMessage;+;chat123")
   #expect(captured?.recipient.isEmpty == true)
   #expect(output.responses.first?["result"] as? [String: Any] != nil)
+}
+
+@Test
+func rpcSendResolvesUniqueContactName() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  let resolver = MockContactResolver(
+    matches: [ContactMatch(name: "Alice Smith", handle: "+15551234567")]
+  )
+  var captured: MessageSendOptions?
+  let server = RPCServer(
+    store: store,
+    verbose: false,
+    output: output,
+    sendMessage: { options in captured = options },
+    resolveSentMessage: resolvedSentMessageFixture,
+    contactResolver: resolver
+  )
+
+  let line = #"{"jsonrpc":"2.0","id":"3n","method":"send","params":{"to":"Alice","text":"yo"}}"#
+  await server.handleLineForTesting(line)
+
+  #expect(captured?.recipient == "+15551234567")
+  #expect(output.responses.first?["result"] as? [String: Any] != nil)
+}
+
+@Test
+func rpcSendRejectsAmbiguousContactName() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  let resolver = MockContactResolver(
+    matches: [
+      ContactMatch(name: "John Smith", handle: "+15551234567"),
+      ContactMatch(name: "John Doe", handle: "+15557654321"),
+    ]
+  )
+  let server = RPCServer(store: store, verbose: false, output: output, contactResolver: resolver)
+
+  let line = #"{"jsonrpc":"2.0","id":"3m","method":"send","params":{"to":"John","text":"yo"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test
+func rpcSendRejectsContactNameWhenContactsAreUnavailable() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  let resolver = MockContactResolver(contactsUnavailable: true)
+  var didSend = false
+  let server = RPCServer(
+    store: store,
+    verbose: false,
+    output: output,
+    sendMessage: { _ in didSend = true },
+    contactResolver: resolver
+  )
+
+  let line = #"{"jsonrpc":"2.0","id":"3u","method":"send","params":{"to":"Alice","text":"yo"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+  #expect(didSend == false)
+}
+
+@Test
+func rpcSendReturnsSentMessageIdentifiersWhenResolved() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  let server = RPCServer(
+    store: store,
+    verbose: false,
+    output: output,
+    sendMessage: { _ in },
+    resolveSentMessage: { _, options, chatID, _ in
+      Message(
+        rowID: 1_979,
+        chatID: chatID ?? 0,
+        sender: "me@icloud.com",
+        text: options.text,
+        date: Date(),
+        isFromMe: true,
+        service: "iMessage",
+        handleID: nil,
+        attachmentsCount: 0,
+        guid: "8DF1B3D7"
+      )
+    }
+  )
+
+  let line = #"{"jsonrpc":"2.0","id":"3b","method":"send","params":{"chat_id":1,"text":"yo"}}"#
+  await server.handleLineForTesting(line)
+
+  let result = output.responses.first?["result"] as? [String: Any]
+  #expect(result?["ok"] as? Bool == true)
+  #expect(int64Value(result?["id"]) == 1_979)
+  #expect(result?["guid"] as? String == "8DF1B3D7")
+  #expect(result?["chat_guid"] as? String == "iMessage;+;chat123")
+  #expect(result?["service"] as? String == "iMessage")
+  #expect(result?["message_id"] as? String == "8DF1B3D7")
+}
+
+@Test
+func rpcAttachmentOnlyKeepsOkResponseWithoutTextVerification() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  let server = RPCServer(
+    store: store,
+    verbose: false,
+    output: output,
+    sendMessage: { _ in },
+    resolveSentMessage: { _, _, _, _ in nil }
+  )
+
+  let line =
+    #"{"jsonrpc":"2.0","id":"3c","method":"send","params":{"chat_id":1,"file":"/tmp/photo.jpg"}}"#
+  await server.handleLineForTesting(line)
+
+  let result = output.responses.first?["result"] as? [String: Any]
+  #expect(result?["ok"] as? Bool == true)
+  #expect(result?["id"] == nil)
+  #expect(result?["guid"] == nil)
+  #expect(result?["chat_guid"] as? String == "iMessage;+;chat123")
+  #expect(result?["service"] as? String == "iMessage")
+}
+
+@Test
+func rpcSendReportsMisroutedChatGhost() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPC()
+  let output = TestRPCOutput()
+  let server = RPCServer(
+    store: store,
+    verbose: false,
+    output: output,
+    sendMessage: { _ in
+      try store.withConnection { db in
+        try db.run("INSERT INTO handle(ROWID, id) VALUES (99, 'iMessage;+;chat123')")
+        try db.run(
+          """
+          INSERT INTO message(ROWID, handle_id, text, date, is_from_me, service)
+          VALUES (99, 99, '', ?, 1, 'SMS')
+          """,
+          CommandTestDatabase.appleEpoch(Date())
+        )
+      }
+    },
+    resolveSentMessage: { _, _, _, _ in nil }
+  )
+
+  let line = #"{"jsonrpc":"2.0","id":"3d","method":"send","params":{"chat_id":1,"text":"yo"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  let data = error?["data"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32001)
+  #expect(data?["retry_safe"] as? Bool == false)
+  #expect(data?["disposition"] as? String == "may_have_completed")
+  #expect(data?["transport"] as? String == "applescript")
+  #expect(data?["operation"] as? String == "send")
+  #expect((data?["detail"] as? String)?.contains("unjoined empty outgoing row (99)") == true)
 }
 
 @Test
@@ -273,6 +492,57 @@ func rpcWatchSubscribeEmitsNotificationAndUnsubscribe() async throws {
   await server.handleLineForTesting(unsubscribe)
 
   #expect(output.responses.count >= 2)
+}
+
+@Test
+func rpcWatchIncludeReactionsDoesNotRequireAttachments() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPCWithReaction()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let subscribe =
+    #"{"jsonrpc":"2.0","id":13,"method":"watch.subscribe","params":{"chat_id":1,"#
+    + #""since_rowid":-1,"include_reactions":true,"attachments":false}}"#
+  await server.handleLineForTesting(subscribe)
+
+  for _ in 0..<20 {
+    if output.notifications.count >= 1 { break }
+    try await Task.sleep(nanoseconds: 50_000_000)
+  }
+
+  let params = output.notifications.first?["params"] as? [String: Any]
+  let message = params?["message"] as? [String: Any]
+  let reactions = message?["reactions"] as? [[String: Any]] ?? []
+  #expect(reactions.count == 1)
+  #expect(reactions.first?["type"] as? String == "like")
+  #expect((message?["attachments"] as? [[String: Any]])?.isEmpty == true)
+}
+
+@Test
+func rpcWatchEmitsPollVotesWithoutReactionEventsEnabled() async throws {
+  let store = try CommandTestDatabase.makeStoreForRPCWithPollVote()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let subscribe =
+    #"{"jsonrpc":"2.0","id":14,"method":"watch.subscribe","params":{"chat_id":1,"since_rowid":6}}"#
+  await server.handleLineForTesting(subscribe)
+
+  for _ in 0..<20 {
+    if output.notifications.count >= 1 { break }
+    try await Task.sleep(nanoseconds: 50_000_000)
+  }
+
+  let params = output.notifications.first?["params"] as? [String: Any]
+  let message = params?["message"] as? [String: Any]
+  let poll = message?["poll"] as? [String: Any]
+  let vote = poll?["vote"] as? [String: Any]
+  #expect(poll?["event"] as? String == "imessage.poll.voted")
+  #expect(poll?["kind"] as? String == "vote")
+  #expect(vote?["option_id"] as? String == "choice-yes")
+  #expect(vote?["option_text"] as? String == "Yes")
+  #expect(vote?["participant"] as? String == "+123")
+  #expect(poll?["original_guid"] as? String == "poll-guid-6")
 }
 
 @Test

@@ -23,8 +23,9 @@ public enum IMCoreBridgeError: Error, CustomStringConvertible {
 /// Bridge to IMCore via DYLD injection into Messages.app.
 ///
 /// Communicates with an injected dylib inside Messages.app via file-based IPC.
-/// The dylib has full access to IMCore because it runs within the Messages.app
-/// context with proper entitlements.
+/// The dylib has access to IMCore when Messages.app accepts the injection.
+/// macOS 26/Tahoe can still block this path with library validation/private
+/// entitlement checks.
 ///
 /// Requires:
 /// - SIP disabled (for `DYLD_INSERT_LIBRARIES` on system apps)
@@ -36,12 +37,7 @@ public final class IMCoreBridge: @unchecked Sendable {
 
   /// Whether the dylib exists on disk (does not check if Messages.app is running).
   public var isAvailable: Bool {
-    let possiblePaths = [
-      "/usr/local/lib/imsg-bridge-helper.dylib",
-      ".build/release/imsg-bridge-helper.dylib",
-      ".build/debug/imsg-bridge-helper.dylib",
-    ]
-    return possiblePaths.contains { FileManager.default.fileExists(atPath: $0) }
+    BridgeHelperLocator.resolve() != nil
   }
 
   private init() {}
@@ -54,48 +50,35 @@ public final class IMCoreBridge: @unchecked Sendable {
       "handle": handle,
       "typing": typing,
     ]
-    _ = try await sendCommand(action: "typing", params: params)
+    _ = try await invokeBridge(action: .typing, params: params)
   }
 
   /// Mark all messages as read in a conversation.
   public func markAsRead(handle: String) async throws {
-    _ = try await sendCommand(action: "read", params: ["handle": handle])
+    _ = try await invokeBridge(action: .read, params: ["handle": handle])
   }
 
   /// List all available chats (for debugging).
   public func listChats() async throws -> [[String: Any]] {
-    let response = try await sendCommand(action: "list_chats", params: [:])
+    let response = try await invokeBridge(action: .listChats, params: [:])
     return response["chats"] as? [[String: Any]] ?? []
   }
 
   /// Get detailed status from the injected helper.
   public func getStatus() async throws -> [String: Any] {
-    return try await sendCommand(action: "status", params: [:])
+    return try await invokeBridge(action: .status, params: [:])
   }
 
   /// Check availability and return a diagnostic message.
   public func checkAvailability() -> (available: Bool, message: String) {
-    let possiblePaths = [
-      "/usr/local/lib/imsg-bridge-helper.dylib",
-      ".build/release/imsg-bridge-helper.dylib",
-      ".build/debug/imsg-bridge-helper.dylib",
-    ]
-
-    var dylibPath: String?
-    for path in possiblePaths {
-      if FileManager.default.fileExists(atPath: path) {
-        dylibPath = path
-        break
-      }
-    }
-
-    guard dylibPath != nil else {
+    guard BridgeHelperLocator.resolve() != nil else {
       return (
         false,
         """
-        imsg-bridge-helper.dylib not found. To build:
-        1. make build-dylib
-        2. Restart imsg
+        imsg-bridge-helper.dylib not found. Searched:
+        \(BridgeHelperLocator.searchPaths().map { "- \($0)" }.joined(separator: "\n"))
+
+        Source installs can build it with `make build-dylib`.
 
         Note: Advanced features require:
         - SIP disabled (for DYLD injection)
@@ -114,8 +97,9 @@ public final class IMCoreBridge: @unchecked Sendable {
 
         To enable advanced features:
         1. Disable SIP in Recovery mode (`csrutil disable`)
-        2. Run `make build-dylib`
-        3. Run `imsg launch`
+        2. Run `imsg launch`
+
+        Source installs also need `make build-dylib` before launching.
         """
       )
     case .unknown(let details):
@@ -130,7 +114,7 @@ public final class IMCoreBridge: @unchecked Sendable {
       break
     }
 
-    if launcher.isInjectedAndReady() {
+    if launcher.hasReadyLockFile() {
       return (true, "Connected to Messages.app. IMCore features available.")
     }
 
@@ -139,28 +123,32 @@ public final class IMCoreBridge: @unchecked Sendable {
       """
       SIP is disabled and the helper dylib is present, but Messages.app is not currently injected.
       Run `imsg launch` to enable advanced IMCore features.
+
+      Note: macOS 26/Tahoe can still block advanced IMCore features through
+      library validation or imagent private entitlement checks. Basic send,
+      history, and watch commands do not use this path.
       """
     )
   }
 
   // MARK: - Private
 
-  private func sendCommand(
-    action: String, params: [String: Any]
+  private func invokeBridge(
+    action: BridgeAction, params: [String: Any]
   ) async throws -> [String: Any] {
     do {
-      let response = try await launcher.sendCommand(action: action, params: params)
-
-      if response["success"] as? Bool == true {
-        return response
+      return try await IMsgBridgeClient.shared.invoke(action: action, params: params)
+    } catch let error as IMsgBridgeError {
+      switch error {
+      case .dylibReturnedError(let message):
+        if message.contains("Chat not found") {
+          let handle = params["handle"] as? String ?? "unknown"
+          throw IMCoreBridgeError.chatNotFound(handle)
+        }
+        throw IMCoreBridgeError.operationFailed(message)
+      default:
+        throw IMCoreBridgeError.connectionFailed(error.description)
       }
-
-      let error = response["error"] as? String ?? "Unknown error"
-      if error.contains("Chat not found") {
-        let handle = params["handle"] as? String ?? "unknown"
-        throw IMCoreBridgeError.chatNotFound(handle)
-      }
-      throw IMCoreBridgeError.operationFailed(error)
     } catch let error as MessagesLauncherError {
       throw IMCoreBridgeError.connectionFailed(error.description)
     }

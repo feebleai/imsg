@@ -34,11 +34,11 @@ go.work.sum
 # SwiftPM
 .build/
 .swiftpm/
-Package.resolved
 *.xcodeproj
 
 # Build artifacts
 bin/
+dist/
 
 # Node.js / pnpm
 pnpm-lock.yaml

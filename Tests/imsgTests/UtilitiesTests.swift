@@ -55,11 +55,108 @@ func attachmentDisplayPrefersTransferName() {
 }
 
 @Test
+func pollDisplayUsesTheFullSelectionSnapshot() {
+  let firstVote = MessagePollVote(
+    optionID: "choice-a",
+    optionText: "Lobster",
+    participant: "+15550002000",
+    eventType: "selected"
+  )
+  let poll = MessagePollEvent(
+    kind: .vote,
+    vote: firstVote,
+    votes: [
+      firstVote,
+      MessagePollVote(
+        optionID: "choice-b",
+        optionText: "Also lobster",
+        participant: "+15550002000",
+        eventType: "selected"
+      ),
+    ]
+  )
+
+  let display = pollDisplayText(for: poll)
+  #expect(display == "[poll vote] +15550002000 selected Lobster / Also lobster")
+  #expect(display.contains("Lobster / Also lobster"))
+  #expect(display != "[poll vote] +15550002000 selected Lobster")
+}
+
+@Test
+func pollDisplayDoesNotReportARemainingSelectionAsANewVote() {
+  let remainingVote = MessagePollVote(
+    optionID: "choice-b",
+    optionText: "Beta",
+    participant: "+15550002000",
+    eventType: "selected"
+  )
+  let poll = MessagePollEvent(
+    kind: .vote,
+    vote: remainingVote,
+    votes: [remainingVote]
+  )
+
+  #expect(pollDisplayText(for: poll) == "[poll vote] +15550002000 selected Beta")
+}
+
+@Test
+func pollDisplayHandlesAnEmptySelectionSnapshot() {
+  let poll = MessagePollEvent(kind: .vote, votes: [])
+  #expect(pollDisplayText(for: poll) == "[poll vote] no options selected")
+}
+
+@Test
 func jsonLinesPrintsSingleLineJSON() throws {
   let line = try JSONLines.encode(["status": "ok"])
   let data = line.data(using: .utf8)!
   let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
   #expect(decoded?["status"] as? String == "ok")
+}
+
+@Test
+func jsonLinesEscapesEmbeddedNewlines() throws {
+  let line = try JSONLines.encode(["text": "Line 1\nLine 2"])
+  #expect(line.contains("\n") == false)
+  #expect(line.contains(#"\n"#) == true)
+
+  let data = line.data(using: .utf8)!
+  let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+  #expect(decoded?["text"] as? String == "Line 1\nLine 2")
+}
+
+@Test
+func jsonObjectOutputEscapesEmbeddedNewlines() async throws {
+  let captured = try await StdoutCapture.capture {
+    try JSONLines.printObject(["text": "Line 1\nLine 2"])
+  }
+
+  #expect(captured.output.filter { $0 == "\n" }.count == 1)
+  #expect(captured.output.contains(#"\n"#) == true)
+
+  let line = captured.output.trimmingCharacters(in: .newlines)
+  let data = line.data(using: .utf8)!
+  let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+  #expect(decoded?["text"] as? String == "Line 1\nLine 2")
+}
+
+@Test
+func rpcWriterEscapesEmbeddedNewlinesInNotifications() async throws {
+  let captured = await StdoutCapture.capture {
+    RPCWriter().sendNotification(
+      method: "message",
+      params: ["message": ["text": "Line 1\nLine 2"]]
+    )
+  }
+
+  #expect(captured.output.filter { $0 == "\n" }.count == 1)
+  #expect(captured.output.contains(#"\n"#) == true)
+
+  let line = captured.output.trimmingCharacters(in: .newlines)
+  let data = line.data(using: .utf8)!
+  let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+  let params = decoded?["params"] as? [String: Any]
+  let message = params?["message"] as? [String: Any]
+  #expect(message?["text"] as? String == "Line 1\nLine 2")
 }
 
 @Test
@@ -85,6 +182,7 @@ func outputModelsEncodeExpectedKeys() throws {
     guid: "msg-guid-7",
     replyToGUID: "msg-guid-1",
     threadOriginatorGUID: "thread-guid-7",
+    threadOriginatorPart: "0:0:2",
     destinationCallerID: "me@icloud.com"
   )
   let attachment = AttachmentMeta(
@@ -95,6 +193,8 @@ func outputModelsEncodeExpectedKeys() throws {
     totalBytes: 10,
     isSticker: false,
     originalPath: "/tmp/file.dat",
+    convertedPath: "/tmp/file.m4a",
+    convertedMimeType: "audio/mp4",
     missing: false
   )
   let reaction = Reaction(
@@ -114,6 +214,7 @@ func outputModelsEncodeExpectedKeys() throws {
   #expect(messageObject?["reply_to_guid"] as? String == "msg-guid-1")
   #expect(messageObject?["destination_caller_id"] as? String == "me@icloud.com")
   #expect(messageObject?["thread_originator_guid"] as? String == "thread-guid-7")
+  #expect(messageObject?["thread_originator_part"] as? String == "0:0:2")
   #expect(messageObject?["created_at"] != nil)
 
   let attachmentPayload = AttachmentPayload(meta: attachment)
@@ -121,6 +222,37 @@ func outputModelsEncodeExpectedKeys() throws {
   let attachmentObject = try JSONSerialization.jsonObject(with: attachmentData) as? [String: Any]
   #expect(attachmentObject?["transfer_name"] as? String == "")
   #expect(attachmentObject?["mime_type"] as? String == "application/octet-stream")
+  #expect(attachmentObject?["converted_path"] as? String == "/tmp/file.m4a")
+  #expect(attachmentObject?["converted_mime_type"] as? String == "audio/mp4")
+}
+
+@Test
+func cliISO8601MatchesFoundationFormatterConcurrently() async {
+  let dates = [
+    Date(timeIntervalSince1970: 0),
+    Date(timeIntervalSince1970: 1_752_000_000.123),
+    Date(timeIntervalSince1970: -0.001),
+    Date(timeIntervalSince1970: 1_752_000_000.999_999),
+  ]
+  let oracle = ISO8601DateFormatter()
+  oracle.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  let expected = dates.map { oracle.string(from: $0) }
+
+  let results = await withTaskGroup(of: [String].self, returning: [[String]].self) { group in
+    for _ in 0..<16 {
+      group.addTask {
+        (0..<100).flatMap { _ in dates.map(CLIISO8601.format) }
+      }
+    }
+    var results: [[String]] = []
+    for await result in group {
+      results.append(result)
+    }
+    return results
+  }
+
+  let repeatedExpected = Array(repeating: expected, count: 100).flatMap { $0 }
+  #expect(results.allSatisfy { $0 == repeatedExpected })
 }
 
 @Test

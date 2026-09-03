@@ -5,18 +5,51 @@ on:
     branches: [ main ]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    runs-on: macos-latest
+  macos:
+    runs-on: macos-26
+    env:
+      SWIFTLINT_VERSION: 0.65.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: macOS version
+        run: sw_vers
       - name: Swift version
         run: swift --version
       - name: Install SwiftLint
-        run: brew install swiftlint
+        run: |
+          curl -fsSL "https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/portable_swiftlint.zip" -o /tmp/swiftlint.zip
+          unzip -q /tmp/swiftlint.zip -d /tmp/swiftlint
+          sudo install -m 0755 /tmp/swiftlint/swiftlint /usr/local/bin/swiftlint
+          swiftlint version
       - name: Lint
         run: make lint
       - name: Test
         run: make test
       - name: Build
-        run: make build ARCHES=$(uname -m)
+        run: make build ARCHES="$(uname -m)"
+
+  linux-read-core:
+    runs-on: ubuntu-latest
+    container: swift:6.3.3-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Swift version
+        run: swift --version
+      - name: Install Python
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3
+      - name: Generate version
+        run: scripts/generate-version.sh
+      - name: Resolve dependencies
+        run: swift package resolve
+      - name: Patch dependencies
+        run: scripts/patch-deps.sh
+      - name: Test Linux read core
+        run: swift test
+      - name: Build CLI
+        run: swift build --product imsg

@@ -1,0 +1,105 @@
+import Foundation
+import Testing
+
+@Test
+func releaseWorkflowPackagesUniversalBuildOutput() throws {
+  let workflow = try readRepositoryFile(".github/workflows/release.yml")
+
+  #expect(
+    workflow.contains(
+      "uses: openclaw/release-workflows/.github/workflows/release-swift-cli.yml@6ecd9e56984238f6bab55eb5504a64fbf867e260"
+    ))
+  #expect(workflow.contains("macos-archive-name: imsg-macos.zip"))
+  #expect(workflow.contains("helper-name: imsg-bridge-helper.dylib"))
+  #expect(workflow.contains("binary-identifier: com.steipete.imsg"))
+  #expect(workflow.contains("helper-identifier: com.steipete.imsg.bridge-helper"))
+  #expect(workflow.contains("MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}"))
+  #expect(workflow.contains("TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}"))
+  #expect(!workflow.contains("swift build -c release --product imsg"))
+  #expect(!workflow.contains("cp .build/release/imsg dist/imsg"))
+}
+
+@Test
+func releaseWorkflowHasTrackedDependencyLock() throws {
+  _ = try readRepositoryFile("Package.resolved")
+  let ignoredPaths = try readRepositoryFile(".gitignore").split(separator: "\n")
+  #expect(!ignoredPaths.contains("Package.resolved"))
+}
+
+@Test
+func universalBuildScriptShipsArm64eHelperSlice() throws {
+  let script = try readRepositoryFile("scripts/build-universal.sh")
+
+  #expect(script.contains(#"ARCHES_VALUE=${ARCHES:-"arm64 x86_64"}"#))
+  // The injected helper must default to arm64e — macOS 26 Messages refuses to
+  // load an arm64-only dylib, which silently kills the bridge.
+  #expect(script.contains(#"HELPER_ARCHES_VALUE=${HELPER_ARCHES:-"arm64e arm64 x86_64"}"#))
+  #expect(script.contains("lipo -create"))
+  #expect(script.contains("--scratch-path"))
+  #expect(script.contains("--show-bin-path"))
+  #expect(script.contains(#"for bundle in "${PRODUCT_DIRS[0]}"/*.bundle"#))
+  #expect(!script.contains(#".build/${ARCH}-apple-macosx"#))
+  #expect(script.contains("imsg-bridge-helper.dylib"))
+  // release.yml ships via this script only, so it must guard every helper slice.
+  #expect(
+    script.contains(
+      #"if ! lipo -archs "${DIST_DIR}/${HELPER_NAME}" | tr ' ' '\n' | grep -Fxq "$ARCH"; then"#))
+  #expect(script.contains("Helper missing required architecture slice"))
+  #expect(script.contains(#"codesign --force --sign -"#))
+  #expect(script.contains(#"cp "${DIST_DIR}/${APP_NAME}" "$OUTPUT_DIR/$APP_NAME""#))
+  #expect(script.contains(#"cp "${DIST_DIR}/${HELPER_NAME}" "$OUTPUT_DIR/$HELPER_NAME""#))
+}
+
+@Test
+func linuxReleaseStaticallyLinksSwiftRuntime() throws {
+  let script = try readRepositoryFile("scripts/build-linux.sh")
+
+  #expect(script.contains("--static-swift-stdlib"))
+}
+
+@Test
+func dependencyPatchTargetsPhoneNumberKitV5BundleResource() throws {
+  let script = try readRepositoryFile("scripts/patch-deps.sh")
+
+  #expect(script.contains("PhoneNumberKit/Sources/PhoneNumberKit/Bundle+Resources.swift"))
+  #expect(!script.contains("PhoneNumberKit/PhoneNumberKit/Bundle+Resources.swift"))
+  #expect(script.contains("PhoneNumberKit bundle resource patch target is missing"))
+  #expect(script.contains("Bundle.main.bundleURL.resolvingSymlinksInPath()"))
+}
+
+@Test
+func bridgeHelperBuildsUseRelocatableInstallName() throws {
+  let developmentBuild = try readRepositoryFile("Makefile")
+  let universalBuild = try readRepositoryFile("scripts/build-universal.sh")
+
+  #expect(developmentBuild.contains("-install_name @rpath/imsg-bridge-helper.dylib"))
+  #expect(universalBuild.contains(#"-install_name "@rpath/${HELPER_NAME}""#))
+}
+
+@Test
+func bridgeHelperBuildsLinkRichLinkFrameworks() throws {
+  for path in ["Makefile", "scripts/build-universal.sh"] {
+    let contents = try readRepositoryFile(path)
+    #expect(contents.contains("-framework ImageIO"))
+    #expect(contents.contains("-framework LinkPresentation"))
+  }
+}
+
+@Test
+func executablePlistDeclaresContactsUsageDescription() throws {
+  let plist = try readRepositoryFile("Sources/imsg/Resources/Info.plist")
+  let generator = try readRepositoryFile("scripts/generate-version.sh")
+  let key = "NSContactsUsageDescription"
+  let description = "Resolve contact names for Messages conversations."
+
+  #expect(plist.contains("<key>\(key)</key>"))
+  #expect(plist.contains("<string>\(description)</string>"))
+  #expect(generator.contains("<key>\(key)</key>"))
+  #expect(generator.contains("<string>\(description)</string>"))
+}
+
+private func readRepositoryFile(_ path: String) throws -> String {
+  let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    .appendingPathComponent(path)
+  return try String(contentsOf: url, encoding: .utf8)
+}

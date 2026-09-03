@@ -1,10 +1,382 @@
 # Changelog
 
 ## Unreleased
-- fix: dedupe URL balloon preview duplicates in watch stream without cross-chat/schema regressions (#64, thanks @lesaai)
-- fix: remove non-functional `typing` command and related RPC methods
-- fix: remove unsupported standalone IMCore typing path and stale error branch
-- test: drop typing-specific unit/integration tests with command/RPC surface removal
+
+### Fixes
+
+- Fall back to raw chat identifiers for empty display names and distinguish unavailable Contacts from unmatched local nicknames (#250, thanks @riverr4t).
+- Let headless `nickname --local` return without an unanswered Contacts permission prompt while preserving interactive prompting (#248, thanks @SebTardif).
+
+### Dependencies
+
+- Update PhoneNumberKit to 5.0.8 for current phone-number metadata.
+
+## 0.14.2 - 2026-08-28
+
+### Highlights
+
+- Direct sends recover safely when a conversation is missing from Messages.app's live chats. Headless `watch` and `search` no longer stall on an unanswered Contacts permission prompt.
+
+### Fixes
+
+- Recover missing live direct-chat objects through the verified participant on the original account before dispatch, for CLI and RPC sends (#244, thanks @0xble).
+- Let headless `watch` and `search` start without waiting for an undetermined Contacts permission prompt while preserving interactive prompting (#238, thanks @SebTardif).
+
+### JSON-RPC
+
+- Add `send.tracked` with caller-owned message IDs so bridge clients can reconcile a lost response through `message.send_status` without guessing which message was sent (#235, thanks @clawSean).
+
+### Dependencies
+
+- Update PhoneNumberKit to 5.0.7 for current phone-number metadata (#245).
+
+### Maintenance
+
+- Restrict CI workflow tokens to read-only repository access (#242, thanks @vincentkoc).
+- Update the CI SwiftLint pin to 0.65.1 and the docs build runtime to Node 26, and make the rich-link cancellation test deterministic (#245).
+
+## 0.14.1 - 2026-08-11
+
+**Highlight:** search now finds messages whose text lives only in the rich-text
+body — previously these were silently invisible to every query.
+
+### Fixes
+
+- Search messages whose body exists only in `attributedBody` (rich text): the SQL prefilter excluded them before decoding could run, so such messages could never match. Candidates are now admitted and matched on decoded text, with logical limits preserved (#233, thanks @lincicomb for the report)
+
+### Maintenance
+
+- Harden the release pipeline: robust signer import, PKCS12 compatibility, Bash 3 signer support, signing-keychain handling, and draft metadata/ID lookups (#225–#231)
+
+## 0.14.0 - 2026-08-10
+
+### Highlights
+- JSON-RPC now has a bounded, recoverable long-lived runtime with protocol-v1 capability reporting, authoritative delivery outcomes, live database/contact refresh, and independently owned database and bridge-event subscriptions.
+- RPC now matches the CLI for message search, ROWID pagination, multipart and rich-attachment sends, poll selectors, attachment reply parts, canonical chat payloads, and SMS fallback control.
+
+### JSON-RPC
+- fix: match CLI poll option resolution and preserve reply part indexes for attachment sends (#213).
+- fix: reject malformed JSON-RPC framing, unknown parameters, conflicting aliases, and coerced values before side effects (#214).
+- fix: bound admitted work, serialize mutations, cap concurrent reads and subscriptions, drain accepted work on EOF, and terminate overflowing watch streams with resumable cursors (#215).
+- fix: report typed delivery dispositions, prevent retries after uncertain bridge or AppleScript sends, verify AppleScript routing, and block only the mutation lane after an in-flight outcome (#216).
+- feat: add protocol-v1 `initialize` and `status`, dynamic capability reporting, non-launching bridge probes, degraded database startup, and same-child recovery (#217).
+- fix: refresh Contacts and mutable chat metadata throughout long-lived sessions, honor each send request's region, and remove process-lifetime routing caches (#218).
+- feat: add `messages.search`, `send.multipart`, rich-file sends, canonical `chats.list` payloads, explicit SMS fallback control, strict semantic validation, and GUID-plus-row-baseline delivery verification (#219).
+- feat: add bounded non-resumable `bridge.events.subscribe` streams with rotation-safe tailing, shared subscription limits, typed terminal errors, and best-effort CLI bridge events (#220).
+- fix: isolate URL-preview replay deduplication per call or watcher and rotate new RPC requests across replaced database generations without swapping active subscriptions (#221).
+- feat: add bounded `messages.after` pagination with authoritative database-instance-scoped ROWID cursors, cross-chat catchup, and optional standalone reaction events (#200, #201, thanks @vincentkoc).
+- fix: let non-interactive RPC startup proceed without a Contacts prompt while rejecting ambiguous name targets when Contacts is unavailable (#186, #187, thanks @SebTardif).
+- fix: fail vanished bridge queue requests immediately without treating an unobserved claim as safe to retry, avoiding long stalls and duplicate sends (#199, thanks @omarshahine).
+
+### Reliability
+- fix: bound osascript send, reaction, and helper-process waits with process-tree cleanup so stalled subprocesses cannot hang CLI or RPC work (#197, thanks @SebTardif).
+- test: replace scheduler-sensitive timing assumptions with deterministic process, launch, refresh, subscription, and file-source readiness gates.
+- ci: run required macOS validation on GitHub-hosted macOS 26 alongside the Linux read-core lane.
+
+### Advanced IMCore
+- fix: open trusted sticker staging roots directly so sandboxed Messages can send staged stickers (#211, #212, thanks @clawcrab).
+- fix: render complete native poll selection snapshots in human-readable history and watch output while preserving the existing poll-vote prefix (#198, thanks @clawSean).
+
+### Documentation
+- docs: rewrite the README as a concise front door to installation, core workflows, and the full documentation site (#206).
+- docs: explain the benign Contacts framework stderr message seen with some CardDAV accounts (#207, #210, thanks @prashantkamani).
+
+### Packaging and Dependencies
+- build: adopt the shared signed, notarized, independently verified Swift CLI release workflow with automatic Homebrew handoff (#205).
+- chore: update PhoneNumberKit, SwiftLint, the Linux Swift toolchain, `actions/setup-node`, and pinned GitHub Actions to current releases (#202, #210).
+
+## 0.13.4 - 2026-07-27
+
+### Highlights
+- Native poll captions can now be suppressed with `--no-comment` when callers already render their own context (thanks @omarshahine).
+
+### Native Polls
+- feat: let CLI and JSON-RPC callers suppress automatic native poll captions with `--no-comment` or `suppress_comment` when they already render context (#196, thanks @omarshahine).
+
+## 0.13.3 - 2026-07-23
+
+### Highlights
+- macOS 26/27 bridge compatibility is restored for typing/account diagnostics and message editing after IMCore selector drift (thanks @sethdford).
+
+### Advanced IMCore
+- fix: restore typing/account diagnostics and message editing on macOS 26 with current IMCore selectors (#194, thanks @sethdford).
+
+## 0.13.2 - 2026-07-21
+
+### Highlights
+- History and JSON output are substantially faster on busy chats: URL-preview coalescing no longer sorts per preview, reactions are collected in one pass without losing cross-chat associations, and timestamps reuse a concurrency-safe formatter (thanks @zachwinter).
+
+### Performance
+- perf: avoid a temporary SQLite sort for every URL-preview lookup in history (#191, thanks @zachwinter).
+- perf: fetch history reactions in one pass while preserving cross-chat reaction associations (#189, thanks @zachwinter).
+- perf: reuse ISO-8601 date formatting safely across high-volume output (#193, thanks @zachwinter).
+
+### Advanced IMCore
+- fix: restore group participant add/remove on macOS 26 by using fallback-capable handle lookup and probing both current and legacy IMChat selectors (#185, thanks @oficiallyAkshay).
+
+## 0.13.1 - 2026-07-17
+
+### Highlights
+- Attachment conversion now times out safely and kills stalled converter process trees instead of blocking metadata resolution indefinitely.
+- Linux read-only builds work again after the converter hardening, with current Commander and phone-number metadata dependencies.
+
+### Attachments
+- fix: bound external attachment converters (ffmpeg) to a 60-second monotonic timeout with full process-tree cleanup so hung conversions cannot block metadata resolution forever (#176, thanks @SebTardif).
+
+### Linux
+- fix: restore Linux builds by importing Glibc instead of Darwin on supported Linux hosts (#182, thanks @omarshahine).
+
+### Dependencies
+- chore: update Commander to 0.2.4 and PhoneNumberKit to 5.0.5, including metadata/9.0.35 (#183).
+
+## 0.13.0 - 2026-07-11
+
+### Read Commands
+- feat: expose per-chat unread counts and inbound message read timestamps across JSON, JSON-RPC, search, history, and watch, with an unread-only chat filter (#160, #170, thanks @chiedo).
+- feat: add snapshot-consistent logical message statistics through `imsg stats` and `messages.stats`, with strict chat scoping, timezone-aware date buckets, and deduplicated optional media totals (#161, thanks @omarshahine).
+- feat: inspect future Send Later rows read-only through `imsg scheduled list` and `messages.scheduled`, without requiring the private IMCore bridge (#163, thanks @omarshahine).
+- feat: inspect local chat-background metadata, cache presence, and newest set/clear event through `imsg chat-background status`, without mutating the chat or requiring the private bridge (#167, thanks @omarshahine).
+- fix: coalesce consecutive link-preview rows from one text send so history and unread chat counts expose one logical message.
+
+### Packaging
+- fix: isolate universal builds per architecture and consume SwiftPM's reported product paths so stale slices cannot silently ship older CLI code.
+
+### Native Polls
+- fix: match native poll vote envelopes, participant handles, and summary metadata so votes render participant markers and correct notifications (#162, thanks @omarshahine).
+- feat: add selective native poll unvoting through CLI and JSON-RPC while preserving the sender's other selected options (#162, thanks @omarshahine).
+
+### Advanced IMCore
+- feat: inspect and explicitly share Apple Messages Name & Photo through `imsg name-photo` and compatible contact RPC methods, while fixing bridge nickname lookup to use the current controller and handle APIs (thanks @omarshahine).
+- feat: add bridge-backed Apple URL preview sends through `send-rich --url` and `send.rich`, with an eight-second out-of-process preparation deadline, capped image decode/staging, and metadata-only fallback (#165, thanks @omarshahine).
+- feat: send standalone or message-attached native stickers through `imsg send-sticker` and `send.sticker`, with bounded image validation and secure staging (#164, thanks @omarshahine).
+- fix: canonicalize securely staged attachment paths when Messages attachments are relocated through a symlink, and find nested threaded-reply items for edit, unsend, delete, and notify operations.
+
+### JSON-RPC
+- fix: atomically claim bridge RPC inbox files before dispatch so multiple injected consumers cannot deliver one logical send twice (#158).
+
+## 0.12.3 - 2026-07-06
+
+### Native Polls
+- fix: show native poll questions by sending a plain caption after created polls and backfilling empty inbound questions from clean native caption rows (#155, thanks @omarshahine).
+
+### Packaging
+- fix: include and validate an arm64e slice in the injected bridge helper for macOS 26 Messages compatibility (#156, thanks @omarshahine).
+
+## 0.12.2 - 2026-07-04
+
+### Native Polls
+- fix: resolve native poll vote option text from Add Choice update rows when votes still reference the original poll message (#152, #153, thanks @veteranbv).
+- fix: restore native poll vote delivery on macOS 26.4 by persisting the Polls balloon and payload across the responding message objects (#150, thanks @omarshahine).
+
+## 0.12.1 - 2026-07-02
+
+### Packaging
+- fix: make Linux release archives standalone by statically linking the Swift runtime.
+- fix: preserve the bridge helper's Developer ID signature through Homebrew installation by using a stable relocatable install name.
+
+## 0.12.0 - 2026-07-02
+
+### Send
+- fix: thread attributed-text formatting through the RPC `send` bridge path, not just `send-rich`, so direct/handle sends render **bold**/*italic*/etc. on macOS 15+. `handleSend` now forwards format ranges to the bridge, accepting `formatting` (the key OpenClaw's `message` tool emits) alongside `text_formatting`/`textFormatting` (#143, thanks @omarshahine).
+- fix: honor `reply_to` aliases on RPC `send` for text and captioned attachments, and fail closed instead of silently delivering an unthreaded AppleScript message when the bridge is unavailable (#144, #145, thanks @TurboTheTurtle and @dkattan).
+
+### Native Polls
+- feat: add bridge-backed native poll voting through `imsg poll vote`, `poll.vote`, and `messages.poll.vote` (#148, thanks @omarshahine).
+
+### Local Lookups
+- fix: include the Contacts usage description in packaged binaries and distinguish unavailable Contacts access from a local address with no match (#147, thanks @cloopadoop).
+
+### Advanced IMCore
+- fix: restore `chat-delete` on macOS 26 by falling back from `deleteChat:` to `IMChatRegistry._chat_remove:`, while failing closed when neither selector is available (#146, #149, thanks @alexzhues).
+
+## 0.11.1 - 2026-06-10
+
+### Read Commands
+- fix: let `chats` and `history` run without prompting for Contacts when permission is still undecided, while preserving Contacts prompts for explicit name-resolution flows (#135, thanks @cemendes).
+
+### JSON Output
+- feat: expose raw Messages `balloon_bundle_id` in message JSON/RPC payloads so consumers can recognize URL-preview rows without parsing text (#137, thanks @omarshahine).
+- fix: coalesce Apple URL-preview split-send rows into one logical message across history, search, and watch, with `url_preview` metadata when the preview row is folded into the text row (#141, thanks @omarshahine).
+
+### Advanced IMCore
+- fix: defer injected bridge bootstrap until after Messages startup so macOS 26 dyld constructor ordering cannot touch ObjC/Foundation/IMCore before the process is ready (#138, thanks @omarshahine).
+- fix: let bridge-backed sends and initial chat creation wait longer for slow Messages private-send completions while keeping short timeouts for probe and mutation calls (#139, thanks @omarshahine).
+
+## 0.11.0 - 2026-05-31
+
+### Send
+- feat: add SIP-free local iMessage/SMS service detection for direct `send --service auto`, with text-only iMessage-to-SMS fallback that never overrides explicit `--service` choices (#132, thanks @ranaroussi).
+- fix: keep direct `send --service auto` usable without Full Disk Access by treating local Messages history lookup as best-effort for direct recipients.
+
+### Local Lookups
+- feat: add `--local` modes for `account`, `whois`, and `nickname` so common introspection can read local history or Contacts without launching the IMCore bridge (#132, thanks @ranaroussi).
+
+## 0.10.0 - 2026-05-28
+
+### Watch
+- fix: re-arm `watch`/RPC filesystem sources after SQLite rotates `chat.db-wal` or `chat.db-shm`, so busy iCloud-synced databases keep emitting inbound rows (#126).
+- fix: retry live watch rows whose chat metadata has not resolved yet, then drop them fail-closed instead of emitting `chat_id=0` direct-message-shaped payloads (#118).
+
+### Native Polls
+- feat: add native Apple Messages poll decoding and bridge-backed `imsg poll send` / `poll.send` support, including threaded poll replies and vote readback (#125, thanks @veteranbv).
+
+### JSON-RPC
+- fix: return chat GUID, message GUID, and service identity from JSON-RPC send/create responses when observable (#119, thanks @svetly).
+- feat: expose `handles.check` for bridge-backed iMessage handle availability checks (#120, thanks @svetly).
+- feat: expose `message.send_status` to query outbound message delivery state by GUID (#121, thanks @svetly).
+
+## 0.9.0 - 2026-05-16
+
+### JSON Output
+- feat: include `reply_to_text` and `reply_to_sender` on message payloads
+  emitted by `history`, `search`, `watch`, and `rpc` so consumers can quote
+  the parent of a threaded reply (or non-reaction association) without a
+  follow-up chat.db lookup. The parent is resolved by joining
+  `thread_originator_guid` or the non-reaction `associated_message_guid`
+  back to the message table; absent parents leave the fields nil (#115, thanks
+  @omarshahine).
+
+### JSON-RPC
+- feat: expose bridge-backed message RPC methods for rich sends, attachments, tapbacks, edits, unsends, deletes, and notify-anyways; include the CLI version in `imsg status --json` so callers can gate newer RPC action surfaces.
+
+### Private API Bridge
+- fix: support threaded attachment replies via `send-rich --file` and
+  `send-attachment --reply-to`, including the macOS 26 attachment staging
+  fallback (#113, #114, thanks @omarshahine).
+- fix: `edit` now applies on macOS 14+ instead of silently no-opping by passing
+  the backing `IMMessageItem` and attributed compatibility text to IMCore (#116,
+  thanks @zshawauxlol).
+
+### Attachments
+- fix: avoid hanging attachment metadata conversion when `ffmpeg` emits enough output to fill stdout or stderr pipes.
+
+## 0.8.2 - 2026-05-11
+
+### JSON-RPC
+- fix: keep `imsg rpc` stdout strictly JSONL when startup fails before the
+  database opens; Full Disk Access failures now answer the caller's request
+  with a JSON-RPC error instead of printing the human permission banner to
+  stdout.
+
+## 0.8.1 - 2026-05-09
+
+### Release Packaging
+- fix: include the IMCore bridge helper dylib in macOS release archives and
+  search Homebrew install paths for brew-installed advanced features (#111,
+  thanks @omarshahine).
+
+### Messaging
+- fix: route JSON-RPC `send` through the IMCore bridge when it is available,
+  with automatic AppleScript fallback and an explicit `transport` override
+  (#108).
+- fix: resolve JSON-RPC `typing` direct recipients against existing chat GUIDs
+  before synthesizing an `iMessage`/`SMS` prefix (#109).
+- fix: stage bridge attachments before dylib sends and let
+  `send-attachment --transport auto` fall back to AppleScript for normal files
+  when the bridge is unavailable (#110, thanks @omarshahine).
+
+## 0.8.0 - 2026-05-08
+
+### Linux Read-Only Preview
+- feat: add a Linux read-only core build with fixture-backed tests and GitHub
+  CI coverage for copied Messages databases.
+- build: add Linux release archive packaging for `imsg-linux-x86_64.tar.gz`.
+- docs: document Linux as read-only support for existing copied Messages
+  databases.
+
+### Message Decoding
+- fix: strip printable typedstream length bytes from recovered `attributedBody`
+  text for 32-126 byte messages (#107, thanks @SagarSDagdu).
+
+## 0.7.3 - 2026-05-06
+
+### Private API Bridge
+- fix: restore macOS 26 bridge sends, replies, tapbacks, typing/read RPC, and
+  chat/group lifecycle RPC methods after the BlueBubbles-inspired bridge port
+  regressed on Tahoe (#101, thanks @omarshahine).
+- fix: stage bridge attachments with the target chat GUID and fall back to the
+  modern IMDPersistence save API when the legacy persistent-path API returns
+  nil (#102, #103, thanks @omarshahine).
+
+### Security
+- fix: harden bridge IPC queue directories and attachment paths against
+  symlink traversal while preserving trusted macOS system aliases like `/tmp`
+  (#105, thanks @omarshahine).
+
+## 0.7.2 - 2026-05-06
+
+### Release Packaging
+- fix: publish a fresh signed and notarized macOS patch archive with matching
+  Homebrew metadata.
+
+## 0.7.1 - 2026-05-06
+
+### Release Packaging
+- fix: ship a signed and notarized macOS release archive and refresh the
+  Homebrew checksum for the patch release.
+
+## 0.7.0 - 2026-05-06
+
+### Private API Bridge
+- feat: port the BlueBubbles-inspired private-API bridge surface for rich sends,
+  message mutation, chat management, account/nickname introspection, and live
+  bridge events; add local DB search and v2 concurrent bridge IPC (#100, thanks
+  @omarshahine).
+- fix: route default bridge calls over v2 IPC when available and reject
+  unsupported `chat-create --service SMS` requests instead of reporting a
+  service that was not applied.
+- fix: decode typedstream attributed bodies with `0x81`/`0x82` length prefixes
+  so long fallback message text is preserved in history and watch output (#99,
+  thanks @SagarSDagdu).
+
+### Docs And CI
+- docs: publish the per-feature docs site at `imsg.sh` and add
+  syntax-highlighted code examples.
+- ci: update GitHub Actions for the Node 24 runtime and quote workflow
+  architecture lookup.
+
+## 0.6.0 - 2026-05-05
+
+### More Reliable Live Streams And History
+- fix: keep `imsg watch` streams alive with a lightweight polling fallback when macOS misses filesystem events (#78).
+- fix: dedupe URL preview balloon messages in `watch` without dropping similar messages from other chats or older database schemas (#64, thanks @lesaai).
+- fix: decode UTF-16LE BOM attributed bodies so plain-text history output recovers messages whose `text` column is empty (#91, thanks @clawbunny).
+- fix: speed up JSON history output by batching attachment and reaction metadata lookups (#81, thanks @kacy).
+- fix: speed up chat listing by using `chat_message_join.message_date` when Messages provides it (#76, thanks @tmad4000).
+- docs: clarify stale Full Disk Access grants, Terminal.app permissions, and watch fallback polling requirements (#28, #32, #33, #46, #83, thanks @wangran870414).
+
+### Better Chat, Group, And Account Diagnostics
+- feat: add `imsg group --chat-id <id>` to inspect a chat's identifier, GUID, service, participants, account metadata, and group/direct status (#88, thanks @mryanb).
+- feat: resolve Contacts names in `chats`, `history`, `watch`, and direct sends while preserving raw handles for automation (#75, #77, thanks @regaw-leinad and @jsindy).
+- feat: expose read-only account routing hints (`account_id`, `account_login`, `last_addressed_handle`) for multi-number diagnostics (#18).
+- fix: include group metadata in CLI JSON history/watch output, not just RPC payloads (#57, thanks @clawbunny).
+
+### Sending, RPC, And Automation Fixes
+- fix: return best-effort sent message `id` and `guid` from RPC `send` responses when the row can be observed after Messages accepts the send (#85).
+- fix: expose RPC watch debounce and default it to 500ms to reduce outbound echo races (#72, #80).
+- fix: gate RPC watch reaction metadata on `include_reactions`, not `attachments` (#82).
+- fix: confirm standard tapback reaction selection in Messages automation before reporting success (#53, thanks @PeterRosdahl).
+- fix: reject unsupported custom emoji reaction sends instead of taking a no-op AppleScript path (#55).
+- fix: detect Tahoe group-send ghost rows and fail instead of reporting false success (#90, thanks @loop).
+- docs: document standard tapback sending and watch reaction events (#66, thanks @safaaleigh).
+
+### Attachments, Completions, And Install Polish
+- feat: optionally report model-compatible converted receive-side attachment files for CAF audio and GIF images (#73, thanks @mfzeidan).
+- feat: add shell completions and an LLM-oriented command reference generator (`imsg completions bash|zsh|fish|llm`) (#21, thanks @bdmorin).
+- fix: publish universal macOS release binaries for Homebrew installs (#68, #79).
+- docs: document the Homebrew install path in the README (#61, thanks @joshuayoes).
+- docs: clarify that `send --file` supports regular file and audio attachments through Messages.app (#35, thanks @rock19).
+- docs: add a local release helper for dispatching Homebrew tap updates (#97, thanks @dinakars777).
+
+### Advanced IMCore / Tahoe Notes
+- feat: add advanced IMCore controls for `status`, `launch`, `read`, and typing diagnostics.
+- fix: normalize IMCore typing chat lookup across `iMessage`, `SMS`, and `any` prefixes (#51, #54, #56, #58).
+- fix: report macOS 26/Tahoe IMCore typing entitlement failures as advanced-feature setup errors instead of misleading chat lookup failures (#60).
+- docs: document macOS 26 advanced IMCore injection, library-validation, and private-entitlement limits (#60).
+
+### Internal Safety
+- refactor: centralize Messages schema detection, row decoding, query assembly, typed row IDs, and attachment/reaction query paths behind smaller `MessageStore` extensions.
+- test: expand release packaging, CLI metadata, schema-compatibility, JSON newline, stdout capture, and live-read coverage.
 
 ## 0.5.0 - 2026-02-16
 

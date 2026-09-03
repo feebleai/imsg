@@ -11,6 +11,8 @@ struct CommandRouter {
     self.version = CommandRouter.resolveVersion()
     self.specs = [
       ChatsCommand.spec,
+      StatsCommand.spec,
+      GroupCommand.spec,
       HistoryCommand.spec,
       WatchCommand.spec,
       SendCommand.spec,
@@ -20,6 +22,33 @@ struct CommandRouter {
       LaunchCommand.spec,
       StatusCommand.spec,
       RpcCommand.spec,
+      CompletionsCommand.spec,
+      ScheduledCommand.spec,
+      ChatBackgroundCommand.spec,
+      // Bridge-backed (require `imsg launch` + SIP off)
+      SendRichCommand.spec,
+      SendMultipartCommand.spec,
+      SendAttachmentCommand.spec,
+      StickerCommand.spec,
+      PollCommand.spec,
+      BridgeReactCommand.spec,
+      EditCommand.spec,
+      UnsendCommand.spec,
+      DeleteMessageCommand.spec,
+      NotifyAnywaysCommand.spec,
+      ChatCreateCommand.spec,
+      ChatNameCommand.spec,
+      ChatPhotoCommand.spec,
+      ChatAddMemberCommand.spec,
+      ChatRemoveMemberCommand.spec,
+      ChatLeaveCommand.spec,
+      ChatDeleteCommand.spec,
+      ChatMarkCommand.spec,
+      SearchCommand.spec,
+      AccountCommand.spec,
+      WhoisCommand.spec,
+      NicknameCommand.spec,
+      NamePhotoCommand.spec,
     ]
     let descriptor = CommandDescriptor(
       name: rootName,
@@ -59,6 +88,10 @@ struct CommandRouter {
       do {
         try await spec.run(invocation.parsedValues, runtime)
         return 0
+      } catch is BridgeOutput.EmittedError {
+        return 1
+      } catch is CommandOutputEmittedError {
+        return 1
       } catch {
         StdoutWriter.writeLine(String(describing: error))
         return 1

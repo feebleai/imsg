@@ -3,6 +3,11 @@ import Foundation
 import IMsgCore
 
 enum WatchCommand {
+  /// Same TTY rule as RPC: headless stdin must not prompt for Contacts.
+  static func contactsAccessPolicy(stdinIsTTY: Bool) -> ContactsAccessPolicy {
+    .forStdin(isTTY: stdinIsTTY)
+  }
+
   static let spec = CommandSpec(
     name: "watch",
     abstract: "Stream incoming messages",
@@ -28,8 +33,16 @@ enum WatchCommand {
             label: "attachments", names: [.long("attachments")], help: "include attachment metadata"
           ),
           .make(
+            label: "convertAttachments", names: [.long("convert-attachments")],
+            help: "convert CAF/GIF attachments to model-compatible cached files"
+          ),
+          .make(
             label: "reactions", names: [.long("reactions")],
             help: "include reaction events (tapback add/remove) in the stream"
+          ),
+          .make(
+            label: "bbEvents", names: [.long("bb-events")],
+            help: "include dylib-pushed events (typing, alias-removed) when injection is active"
           ),
         ]
       )
@@ -46,14 +59,30 @@ enum WatchCommand {
     values: ParsedValues,
     runtime: RuntimeOptions,
     storeFactory: @escaping (String) throws -> MessageStore = { try MessageStore(path: $0) },
+    contactResolverFactory: @escaping () async -> any ContactResolving = {
+      await ContactResolver.create(
+        accessPolicy: contactsAccessPolicy(stdinIsTTY: ContactsAccessPolicy.stdinIsTTY)
+      )
+    },
     streamProvider:
       @escaping (
         MessageWatcher,
         Int64?,
         Int64?,
-        MessageWatcherConfiguration
-      ) -> AsyncThrowingStream<Message, Error> = { watcher, chatID, sinceRowID, config in
-        watcher.stream(chatID: chatID, sinceRowID: sinceRowID, configuration: config)
+        MessageWatcherConfiguration,
+        MessageFilter
+      ) -> AsyncThrowingStream<Message, Error> = {
+        watcher, chatID, sinceRowID, config, filter in
+        watcher.stream(
+          chatID: chatID,
+          sinceRowID: sinceRowID,
+          configuration: config,
+          filter: filter
+        )
+      },
+    bridgeStreamProvider:
+      @escaping (String) throws -> AsyncThrowingStream<IMsgEventTailer.Event, Error> = { path in
+        IMsgEventTailer(path: path, createIfMissing: true).events()
       }
   ) async throws {
     let dbPath = values.option("db") ?? MessageStore.defaultPath
@@ -64,6 +93,8 @@ enum WatchCommand {
     }
     let sinceRowID = values.optionInt64("sinceRowID")
     let showAttachments = values.flag("attachments")
+    let attachmentOptions = AttachmentQueryOptions(
+      convertUnsupported: values.flag("convertAttachments"))
     let includeReactions = values.flag("reactions")
     let participants = values.optionValues("participants")
       .flatMap { $0.split(separator: ",").map { String($0) } }
@@ -76,47 +107,47 @@ enum WatchCommand {
 
     let store = try storeFactory(dbPath)
     let watcher = MessageWatcher(store: store)
+    let contacts = await contactResolverFactory()
     let config = MessageWatcherConfiguration(
       debounceInterval: debounceInterval,
       batchLimit: 100,
       includeReactions: includeReactions
     )
 
-    let stream = streamProvider(watcher, chatID, sinceRowID, config)
-    for try await message in stream {
-      if !filter.allows(message) {
-        continue
-      }
+    let stream = streamProvider(watcher, chatID, sinceRowID, config, filter)
+    let emitMessage: @Sendable (Message) throws -> Void = { message in
       if runtime.jsonOutput {
-        let attachments = try store.attachments(for: message.rowID)
-        let reactions = try store.reactions(for: message.rowID)
-        let payload = MessagePayload(
+        let payload = try buildMessagePayload(
+          store: store,
           message: message,
-          attachments: attachments,
-          reactions: reactions
+          includeAttachments: true,
+          includeReactions: true,
+          attachmentOptions: attachmentOptions,
+          contactResolver: contacts
         )
-        try StdoutWriter.writeJSONLine(payload)
-        continue
+        try JSONLines.printObject(payload)
+        return
       }
       let direction = message.isFromMe ? "sent" : "recv"
       let timestamp = CLIISO8601.format(message.date)
+      let sender =
+        message.isFromMe
+        ? message.sender : (contacts.displayName(for: message.sender) ?? message.sender)
       if message.isReaction, let reactionType = message.reactionType {
         let action = (message.isReactionAdd ?? true) ? "added" : "removed"
         let targetGUID = message.reactedToGUID ?? "unknown"
         StdoutWriter.writeLine(
-          "\(timestamp) [\(direction)] \(message.sender) \(action) \(reactionType.emoji) reaction to \(targetGUID)"
+          "\(timestamp) [\(direction)] \(sender) \(action) \(reactionType.emoji) reaction to \(targetGUID)"
         )
-        continue
+        return
       }
-      StdoutWriter.writeLine("\(timestamp) [\(direction)] \(message.sender): \(message.text)")
+      let body = message.poll.map { pollDisplayText(for: $0) } ?? message.text
+      StdoutWriter.writeLine("\(timestamp) [\(direction)] \(sender): \(body)")
       if message.attachmentsCount > 0 {
         if showAttachments {
-          let metas = try store.attachments(for: message.rowID)
+          let metas = try store.attachments(for: message.rowID, options: attachmentOptions)
           for meta in metas {
-            let name = displayName(for: meta)
-            StdoutWriter.writeLine(
-              "  attachment: name=\(name) mime=\(meta.mimeType) missing=\(meta.missing) path=\(meta.originalPath)"
-            )
+            StdoutWriter.writeLine(attachmentMetadataLine(for: meta))
           }
         } else {
           StdoutWriter.writeLine(
@@ -124,6 +155,47 @@ enum WatchCommand {
           )
         }
       }
+    }
+
+    func watchDatabase() async throws {
+      for try await message in stream {
+        try Task.checkCancellation()
+        try emitMessage(message)
+      }
+    }
+
+    guard values.flag("bbEvents") else {
+      try await watchDatabase()
+      return
+    }
+
+    let bridgeStream = try? bridgeStreamProvider(MessagesLauncher.shared.bridgeEventsFile)
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      defer { group.cancelAll() }
+      if let bridgeStream {
+        group.addTask {
+          do {
+            for try await event in bridgeStream {
+              try Task.checkCancellation()
+              if runtime.jsonOutput {
+                var object: [String: Any] = [
+                  "kind": "bridge-event",
+                  "event": event.name,
+                  "data": event.decodedPayload(),
+                ]
+                if let timestamp = event.timestamp { object["ts"] = timestamp }
+                try JSONLines.printObject(object)
+              } else {
+                let timestamp = event.timestamp ?? CLIISO8601.format(Date())
+                StdoutWriter.writeLine("\(timestamp) [bridge] \(event.name)")
+              }
+            }
+          } catch {}
+        }
+      }
+
+      try await watchDatabase()
+      try Task.checkCancellation()
     }
   }
 }

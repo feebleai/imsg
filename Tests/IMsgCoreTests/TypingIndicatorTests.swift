@@ -41,3 +41,73 @@ func typingIndicatorStopsAfterNormalDuration() async throws {
   #expect(didSleep == true)
   #expect(events == ["start", "stop"])
 }
+
+@Test
+func typingLookupCandidatesExpandAnyPrefixToServiceVariants() {
+  let candidates = TypingIndicator.chatLookupCandidates(for: "any;-;+15551234567")
+
+  #expect(
+    candidates == [
+      "any;-;+15551234567",
+      "+15551234567",
+      "iMessage;-;+15551234567",
+      "iMessage;+;+15551234567",
+      "SMS;-;+15551234567",
+      "SMS;+;+15551234567",
+      "any;+;+15551234567",
+    ])
+}
+
+@Test
+func typingLookupCandidatesAvoidDoublePrefixingDirectIdentifiers() {
+  let candidates = TypingIndicator.chatLookupCandidates(for: " iMessage;-;user@example.com ")
+
+  #expect(
+    candidates == [
+      "iMessage;-;user@example.com",
+      "user@example.com",
+      "iMessage;+;user@example.com",
+      "SMS;-;user@example.com",
+      "SMS;+;user@example.com",
+      "any;-;user@example.com",
+      "any;+;user@example.com",
+    ])
+}
+
+@Test
+func typingLookupCandidatesRejectBlankIdentifier() {
+  #expect(TypingIndicator.chatLookupCandidates(for: "   ").isEmpty)
+}
+
+@Test
+func typingDaemonUnavailableMessageExplainsTahoeEntitlementBlock() {
+  let message = TypingIndicator.daemonUnavailableMessage()
+
+  #expect(message.contains("imagent"))
+  #expect(message.contains("macOS 26/Tahoe"))
+  #expect(message.contains("Apple-private entitlements"))
+  #expect(message.contains("imsg status"))
+  #expect(message.contains("send"))
+  #expect(message.contains("history"))
+  #expect(message.contains("watch"))
+}
+
+#if os(macOS)
+  @Test
+  func typingBridgeWaitHasFiniteMonotonicBound() {
+    let clock = ContinuousClock()
+    let start = clock.now
+    do {
+      try TypingIndicator.waitForBridgeOperation(operation: "typing", timeout: 0.02) {
+        try await Task.sleep(for: .seconds(10))
+      }
+      Issue.record("expected bounded bridge wait failure")
+    } catch let failure as DeliveryFailure {
+      #expect(failure.disposition == .stillInFlight)
+      #expect(failure.retrySafe == false)
+    } catch {
+      Issue.record("unexpected error: \(error)")
+    }
+    #expect(start.duration(to: clock.now) < .seconds(1))
+  }
+#endif

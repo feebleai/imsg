@@ -1,102 +1,41 @@
-name: release
+name: Release
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Tag to (re)release (e.g. v0.1.0)"
+      version:
+        description: SemVer to release
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Determine tag
-        id: tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout release tag
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: git checkout ${{ steps.tag.outputs.tag }}
-
-      - name: Resolve packages
-        run: swift package resolve
-
-      - name: Patch dependencies
-        run: scripts/patch-deps.sh
-
-      - name: Sync version
-        run: scripts/generate-version.sh
-
-      - name: Build
-        run: swift build -c release --product imsg
-
-      - name: Codesign
-        run: codesign --force --sign - --entitlements Resources/imsg.entitlements --identifier com.steipete.imsg .build/release/imsg
-
-      - name: Package artifact
-        run: |
-          mkdir -p dist
-          cp .build/release/imsg dist/imsg
-          for bundle in .build/release/*.bundle; do
-            if [ -e "$bundle" ]; then
-              cp -R "$bundle" dist/
-            fi
-          done
-          (
-            cd dist
-            shopt -s nullglob
-            bundles=( *.bundle )
-            if [ ${#bundles[@]} -gt 0 ]; then
-              zip -r imsg-macos.zip imsg "${bundles[@]}"
-            else
-              zip -r imsg-macos.zip imsg
-            fi
-          )
-
-      - name: Publish release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          files: dist/imsg-macos.zip
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update GitHub release notes from CHANGELOG
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          version="${TAG#v}"
-          notes_file="/tmp/release-notes.md"
-
-          awk -v v="$version" '
-            $0 ~ ("^## " v "($|[[:space:]]-)") { in_section=1; next }
-            in_section && $0 ~ "^## " { exit }
-            in_section { print }
-          ' CHANGELOG.md > "$notes_file"
-
-          if ! grep -q '[^[:space:]]' "$notes_file"; then
-            echo "No CHANGELOG.md section found for version $version" >&2
-            exit 1
-          fi
-
-          gh release edit "$TAG" --notes-file "$notes_file"
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      pull-requests: write
+      statuses: read
+    # Pin immutable Swift release hotfixes until the v1 compatibility tag includes them.
+    uses: openclaw/release-workflows/.github/workflows/release-swift-cli.yml@6ecd9e56984238f6bab55eb5504a64fbf867e260
+    with:
+      version: ${{ inputs.version }}
+      repository-type: personal
+      homebrew-tap: steipete/homebrew-tap
+      homebrew-formula: imsg
+      binary-name: imsg
+      helper-name: imsg-bridge-helper.dylib
+      binary-identifier: com.steipete.imsg
+      helper-identifier: com.steipete.imsg.bridge-helper
+      macos-archive-name: imsg-macos.zip
+      linux-archive-name: imsg-linux-x86_64.tar.gz
+      ci-check-events: '["push","pull_request"]'
+    secrets:
+      MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+      MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

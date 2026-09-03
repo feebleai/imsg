@@ -1,116 +1,103 @@
-# 💬 imsg — Send, read, stream iMessage & SMS
+# imsg 💬 — Messages, piped.
 
-A macOS Messages.app CLI to send, read, and stream iMessage/SMS (with attachment metadata). Read-only for receives; send uses AppleScript (no private APIs).
+[![CI](https://img.shields.io/github/actions/workflow/status/openclaw/imsg/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/openclaw/imsg/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/openclaw/imsg?style=flat-square)](https://github.com/openclaw/imsg/releases/latest)
+[![macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey?style=flat-square)](docs/install.md)
+[![Swift 6](https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white)](https://www.swift.org)
+[![License](https://img.shields.io/github/license/openclaw/imsg?style=flat-square)](LICENSE)
+[![Homebrew](https://img.shields.io/badge/Homebrew-steipete%2Ftap-FBB040?style=flat-square&logo=homebrew&logoColor=black)](https://github.com/steipete/homebrew-tap)
+[![Docs](https://img.shields.io/badge/docs-imsg.sh-4B5563?style=flat-square)](https://imsg.sh)
 
-## Features
-- List chats, view history, or stream new messages (`watch`).
-- Send text and attachments via iMessage or SMS (AppleScript, no private APIs).
-- Phone normalization to E.164 for reliable buddy lookup (`--region`, default US).
-- Optional attachment metadata output (mime, name, path, missing flag).
-- Filters: participants, start/end time, JSON output for tooling.
-- Read-only DB access (`mode=ro`), no DB writes.
-- Event-driven watch via filesystem events.
-- Optional advanced IMCore features (`typing`, `launch`, `status`) behind explicit SIP-off setup.
+![imsg banner](docs/assets/readme-banner.jpg)
 
-## Requirements
-- macOS 14+ with Messages.app signed in.
-- Full Disk Access for your terminal to read `~/Library/Messages/chat.db`.
-- Automation permission for your terminal to control Messages.app (for sending).
-- For SMS relay, enable “Text Message Forwarding” on your iPhone to this Mac.
+`imsg` is a Swift CLI for reading, watching, and sending iMessage and SMS from macOS. It reads the local Messages database, sends through Messages.app automation, and exposes NDJSON and JSON-RPC for scripts and agents.
+
+```bash
+imsg chats --limit 10 --json | jq -s
+imsg history --chat-id 42 --limit 20 --attachments --json | jq -s
+imsg watch --chat-id 42 --reactions --json
+imsg send --to "+14155551212" --text "on my way"
+```
+
+That's the whole pitch: read directly, stream updates, and ask Messages.app to send.
 
 ## Install
+
+Homebrew is the smallest path on macOS:
+
 ```bash
-make build
-# binary at ./bin/imsg
+brew install steipete/tap/imsg
+imsg --version
 ```
 
-## Commands
-- `imsg chats [--limit 20] [--json]` — list recent conversations.
-- `imsg history --chat-id <id> [--limit 50] [--attachments] [--participants +15551234567,...] [--start 2025-01-01T00:00:00Z] [--end 2025-02-01T00:00:00Z] [--json]`
-- `imsg watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250ms] [--attachments] [--participants …] [--start …] [--end …] [--json]`
-- `imsg send --to <handle> [--text "hi"] [--file /path/img.jpg] [--service imessage|sms|auto] [--region US]`
-- `imsg read --to <handle> [--chat-id <id> | --chat-identifier <id> | --chat-guid <guid>]`
-- `imsg typing --to <handle> [--duration 5s] [--stop true] [--service imessage|sms|auto]`
-- `imsg status [--json]` — advanced feature and SIP status
-- `imsg launch [--dylib <path>] [--kill-only] [--json]`
+`imsg` requires macOS 14 or newer. Signed macOS builds and Linux x86_64 read-only builds are also available from [GitHub Releases](https://github.com/openclaw/imsg/releases/latest). Linux reads a `chat.db` copied from macOS; it does not connect to iMessage or send messages. See the [Linux guide](docs/linux.md).
 
-### Quick samples
-```
-# list 5 chats
-imsg chats --limit 5
+## Quick start
 
-# list chats as JSON
-imsg chats --limit 5 --json
+Grant your terminal **Full Disk Access** in **System Settings → Privacy & Security**, then reopen it. `imsg` needs that permission to read `~/Library/Messages/chat.db`.
 
-# last 10 messages in chat 1 with attachments
-imsg history --chat-id 1 --limit 10 --attachments
-
-# filter by date and emit JSON
-imsg history --chat-id 1 --start 2025-01-01T00:00:00Z --json
-
-# live stream a chat
-imsg watch --chat-id 1 --attachments --debounce 250ms
-
-# send a picture
-imsg send --to "+14155551212" --text "hi" --file ~/Desktop/pic.jpg --service imessage
-
-# mark a chat as read
-imsg read --to "+14155551212"
-
-# advanced status check
-imsg status
-
-# launch Messages with injection (SIP must be disabled first)
-imsg launch
-
-# show typing indicator for 5s
-imsg typing --to "+14155551212" --duration 5s
-```
-
-## Attachment notes
-`--attachments` prints per-attachment lines with name, MIME, missing flag, and resolved path (tilde expanded). Only metadata is shown; files aren’t copied.
-
-## JSON output
-`imsg chats --json` emits one JSON object per chat with fields: `id`, `name`, `identifier`, `service`, `last_message_at`.
-`imsg history --json` and `imsg watch --json` emit one JSON object per message with fields: `id`, `chat_id`, `guid`, `reply_to_guid`, `destination_caller_id`, `sender`, `is_from_me`, `text`, `created_at`, `attachments` (array of metadata with `filename`, `transfer_name`, `uti`, `mime_type`, `total_bytes`, `is_sticker`, `original_path`, `missing`), `reactions`.
-
-Note: `reply_to_guid`, `destination_caller_id`, and `reactions` are read-only metadata.
-
-## Permissions troubleshooting
-If you see “unable to open database file” or empty output:
-1) Grant Full Disk Access: System Settings → Privacy & Security → Full Disk Access → add your terminal.
-2) Ensure Messages.app is signed in and `~/Library/Messages/chat.db` exists.
-3) For send, allow the terminal under System Settings → Privacy & Security → Automation → Messages.
-
-## Advanced Features (SIP-Off Only)
-Advanced features (`typing`, `launch`, IMCore bridge) require injecting a helper dylib into `Messages.app`.
-
-Important:
-- This is opt-in only. Default send/history/watch flows do not need injection.
-- `imsg launch` refuses to inject when SIP is enabled.
-- `imsg status` is read-only and does not auto-launch or auto-inject.
-
-Setup:
-1) Disable SIP from Recovery mode: `csrutil disable`
-2) Grant Full Disk Access to your terminal
-3) Build helper dylib: `make build-dylib`
-4) Launch with injection: `imsg launch`
-5) Verify: `imsg status`
-
-To revert after testing, re-enable SIP in Recovery mode: `csrutil enable`.
-
-## Testing
 ```bash
-make test
+# Find a chat and note its id.
+imsg chats --limit 3
+
+# Read its ten most recent messages.
+imsg history --chat-id 42 --limit 10
 ```
 
-Note: `make test` applies a small patch to SQLite.swift to silence a SwiftPM warning about `PrivacyInfo.xcprivacy`.
+Use an id from the first command in place of `42`. The [five-minute quickstart](docs/quickstart.md) continues with live watching and sending.
 
-## Linting & formatting
+## Core workflows
+
+| Goal | Start here |
+| --- | --- |
+| List chats and inspect their identifiers | [Chats](docs/chats.md) and [groups](docs/groups.md) |
+| Read or search local history | [History](docs/history.md) |
+| Stream new messages and tapbacks | [Watch](docs/watch.md) |
+| Send text, files, and standard tapbacks | [Send](docs/send.md) and [attachments](docs/attachments.md) |
+| Count messages and media | [Statistics](docs/stats.md) |
+| Consume stable NDJSON or a long-running stdio API | [JSON schema](docs/json.md) and [JSON-RPC](docs/rpc.md) |
+| Generate shell completions or model-ready CLI help | [Completions](docs/completions.md) |
+
+Read commands open the database in SQLite read-only mode. `watch` follows database and WAL filesystem events, with a polling fallback when macOS drops an event or rotates a sidecar file.
+
+## Permissions
+
+Full Disk Access is required for local database reads. Sending and standard tapbacks also require **Automation → Messages**; Contacts access is optional and only adds resolved names. The [permissions guide](docs/permissions.md) covers parent-process grants and stale TCC entries, while [troubleshooting](docs/troubleshooting.md) maps common failures to their likely gate.
+
+For SMS, enable Text Message Forwarding on the paired iPhone. `imsg send` uses Messages.app's AppleScript surface and cannot force a particular outgoing number when several numbers share one Apple ID.
+
+## JSON and automation
+
+`--json` emits one JSON object per line. Human progress and warnings stay on stderr, so stdout remains safe to stream. Pipe finite commands through `jq -s` when you want one array.
+
+```bash
+imsg chats --json | jq -s
+imsg rpc
+imsg completions llm
+```
+
+The [JSON schema](docs/json.md) documents chats, messages, attachments, reactions, polls, scheduled messages, and statistics. The [JSON-RPC reference](docs/rpc.md) covers the long-running stdio transport used by agents and gateways.
+
+## Advanced IMCore
+
+Normal `chats`, `history`, `watch`, `send`, `react`, and read-only RPC workflows do not use private frameworks or process injection.
+
+Read receipts, typing indicators, rich sends, message mutation, stickers, polls, and chat management use an injected helper inside Messages.app. They require SIP to be disabled and may be blocked by library validation or private-entitlement checks on current macOS releases. Start with [Advanced IMCore](docs/advanced-imcore.md), then use the [bridge command reference](docs/bridge.md) for the full CLI surface and IPC layout.
+
+## Documentation
+
+The complete guide lives at **[imsg.sh](https://imsg.sh)**. Useful entry points include [install](docs/install.md), [permissions](docs/permissions.md), [history](docs/history.md), [watch](docs/watch.md), [send](docs/send.md), [attachments](docs/attachments.md), [Linux](docs/linux.md), and [troubleshooting](docs/troubleshooting.md).
+
+## Development
+
 ```bash
 make lint
-make format
+make test
+make build
 ```
 
-## Core library
-The reusable Swift core lives in `Sources/IMsgCore` and is consumed by the CLI target. Apps can depend on the `IMsgCore` library target directly.
+`IMsgCore` contains the reusable Swift core, `imsg` contains the CLI, and `IMsgHelper` contains the optional injected helper. The package uses Swift 6 and targets macOS 14 or newer.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Not affiliated with Apple; iMessage and SMS are trademarks of their respective owners.

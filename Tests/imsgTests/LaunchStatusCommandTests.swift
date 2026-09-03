@@ -39,6 +39,7 @@ func statusCommandProducesJsonOutput() async throws {
     try? await StatusCommand.run(values: values, runtime: runtime)
   }
   // JSON output should contain expected keys
+  #expect(output.contains(#""version":"\#(IMsgVersion.current)""#))
   #expect(output.contains("basic_features"))
   #expect(output.contains("advanced_features"))
 }
@@ -56,4 +57,27 @@ func statusCommandProducesTextOutput() async throws {
     try? await StatusCommand.run(values: values, runtime: runtime)
   }
   #expect(output.contains("imsg Status Report"))
+  #expect(output.contains(IMsgVersion.current))
+}
+
+@Test
+func statusOnlyAdvertisesStickerSendWhenSelectorsAreReady() {
+  #expect(!StatusCommand.availableBridgeSendCommands(selectors: [:]).contains("send-sticker"))
+  #expect(
+    !StatusCommand.availableBridgeSendCommands(selectors: ["stickerSend": false])
+      .contains("send-sticker"))
+  #expect(
+    StatusCommand.availableBridgeSendCommands(selectors: ["stickerSend": true])
+      .contains("send-sticker"))
+}
+
+@Test
+func statusOnlyAdvertisesTrackedSendForCurrentHelperCapability() {
+  #expect(!StatusCommand.advertisedRPCMethods(selectors: [:]).contains("send.tracked"))
+  #expect(
+    !StatusCommand.advertisedRPCMethods(selectors: ["clientMessageGuidReservation": false])
+      .contains("send.tracked"))
+  #expect(
+    StatusCommand.advertisedRPCMethods(selectors: ["clientMessageGuidReservation": true])
+      .contains("send.tracked"))
 }
